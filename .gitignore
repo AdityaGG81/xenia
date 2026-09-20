@@ -1,0 +1,22 @@
+# IDE
+.idea/
+.vscode/
+
+# Build artifacts
+bin/
+node/bin/
+*/__pycache__/
+*.pyc
+
+# Node modules (PWA)
+client/node_modules/
+client/dist/
+
+# Logs and scratch
+logs/
+*.log
+scratch/
+.env
+
+# Storage files
+/tmp/xenia-storage*
