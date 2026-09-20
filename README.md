@@ -1,6 +1,6 @@
-# Infrastructure-Independent Local Communication Network (IILCN)
+# Infrastructure-Independent Local Communication Network (Xenia)
 
-IILCN is a research project for local communication without Internet, cellular
+Xenia is a research project for local communication without Internet, cellular
 service, or a centralized server during local operation.  The intended physical
 deployment is Android phones connected by Wi-Fi to Raspberry Pi nodes, with the
 Pi nodes participating in a multi-hop wireless mesh.
@@ -93,7 +93,7 @@ across the mesh.
 
 ## Two-phone lab
 
-When the temporary `IILCN-Lab` hotspot is active and both phones are connected:
+When the temporary `Xenia-Lab` hotspot is active and both phones are connected:
 
 ```bash
 ./scripts/run-phone-lab.sh

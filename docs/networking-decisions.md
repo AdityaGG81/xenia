@@ -2,7 +2,7 @@
 
 ## ADR-001: Start with Mininet namespaces and veth links
 
-**Decision.** Represent each IILCN node as a Mininet host (a Linux network
+**Decision.** Represent each Xenia node as a Mininet host (a Linux network
 namespace), connected by veth pairs.  Use direct host-to-host links rather than
 an Open vSwitch data plane for the initial topologies.
 

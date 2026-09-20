@@ -5,7 +5,7 @@
 # This script:
 #   1. Disconnects wlan0 from any managed network
 #   2. Sets wlan0 to IBSS (ad-hoc) mode
-#   3. Joins the "iilcn-mesh" ad-hoc cell
+#   3. Joins the "xenia-mesh" ad-hoc cell
 #   4. Layers BATMAN-adv on top via bat0
 #   5. Assigns a mesh IP (10.20.0.<node-number>)
 set -euo pipefail
@@ -19,11 +19,11 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 MESH_IP="10.20.0.${NODE_NUM}/24"
-MESH_SSID="iilcn-mesh"
+MESH_SSID="xenia-mesh"
 MESH_FREQ=2412  # Channel 1 (2.4 GHz)
 MESH_BSSID="02:12:34:56:78:9A"  # Fixed BSSID so both Pis join the same cell
 
-echo "=== IILCN Mesh Setup: Node $NODE_NUM ==="
+echo "=== Xenia Mesh Setup: Node $NODE_NUM ==="
 echo "    Mesh IP:   $MESH_IP"
 echo "    SSID:      $MESH_SSID"
 echo "    Frequency: $MESH_FREQ MHz (Channel 1)"
@@ -73,8 +73,8 @@ echo "  bat0 IP:    $MESH_IP"
 echo "  Verify:     batctl n       (should show the other Pi)"
 echo "  Ping peer:  ping 10.20.0.$((3 - NODE_NUM))"
 echo ""
-echo "  To start the IILCN node service:"
-echo "    /tmp/iilcn-node --node-id pi${NODE_NUM} --listen 0.0.0.0:8080 \\"
+echo "  To start the Xenia node service:"
+echo "    /tmp/xenia-node --node-id pi${NODE_NUM} --listen 0.0.0.0:8080 \\"
 echo "      --peer-url http://10.20.0.$((3 - NODE_NUM)):8080 \\"
-echo "      --storage-dir /tmp/iilcn-storage"
+echo "      --storage-dir /tmp/xenia-storage"
 echo "============================================================"

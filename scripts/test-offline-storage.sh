@@ -2,16 +2,16 @@
 set -euo pipefail
 
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-node_binary="/tmp/iilcn-node"
+node_binary="/tmp/xenia-node"
 storage_dir=$(mktemp -d)
 
 (
   cd "$project_root/node"
-  go build -buildvcs=false -o "$node_binary" ./cmd/iilcn-node
+  go build -buildvcs=false -o "$node_binary" ./cmd/xenia-node
 )
 
 echo "== Starting node with storage dir: $storage_dir =="
-"$node_binary" --node-id n1 --listen 127.0.0.1:8080 --storage-dir "$storage_dir" > /tmp/iilcn-offline.log 2>&1 &
+"$node_binary" --node-id n1 --listen 127.0.0.1:8080 --storage-dir "$storage_dir" > /tmp/xenia-offline.log 2>&1 &
 NODE_PID=$!
 
 # Wait for healthy
@@ -40,7 +40,7 @@ kill $NODE_PID
 wait $NODE_PID || true
 
 echo "== Restarting node with same storage dir =="
-"$node_binary" --node-id n1 --listen 127.0.0.1:8080 --storage-dir "$storage_dir" > /tmp/iilcn-offline.log 2>&1 &
+"$node_binary" --node-id n1 --listen 127.0.0.1:8080 --storage-dir "$storage_dir" > /tmp/xenia-offline.log 2>&1 &
 NODE_PID=$!
 
 for i in {1..10}; do

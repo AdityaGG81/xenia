@@ -1,4 +1,4 @@
-# IILCN implementation journal
+# Xenia implementation journal
 
 This is the running record of what has been implemented, why the decision was
 made, how it was verified, and what remains outside its scope.  Update this file
@@ -7,7 +7,7 @@ report as well as day-to-day development.
 
 ## Project objective
 
-IILCN aims to provide local communication between Android users through nearby
+Xenia aims to provide local communication between Android users through nearby
 Raspberry Pi nodes without Internet, cellular service, or a central server during
 local operation.  The eventual system needs discovery, presence, messaging,
 offline buffering, signalling, and multi-hop forwarding.  Voice calling and
@@ -91,7 +91,7 @@ buffers.  That is the next application-network milestone.
 
 ## 2026-09-04 — Smartphone access-network preparation
 
-**Implemented.** Created the temporary `IILCN-Lab` WPA2 hotspot on the laptop's
+**Implemented.** Created the temporary `Xenia-Lab` WPA2 hotspot on the laptop's
 otherwise unused `wlo1` interface using NetworkManager.  Its hotspot interface
 address is `10.42.0.1/24`.  NetworkManager successfully started AP mode with the
 RTL8852AE/`rtw89_8852ae` radio.  Activation initially failed because the
@@ -104,7 +104,7 @@ access networks for two phone-edge nodes, but one shared access network lets a
 real Android phone reach an assigned virtual edge node.  This is the smallest
 hardware-free step toward an end-to-end phone-to-node prototype.
 
-**Verification.** NetworkManager reports `wlo1` as connected to `IILCN-Lab` and
+**Verification.** NetworkManager reports `wlo1` as connected to `Xenia-Lab` and
 assigns it `10.42.0.1/24`; Ethernet (`eno1`) remains independently connected.
 
 **Limit.** This is only an access-network preparation step.  No virtual edge
@@ -112,7 +112,7 @@ interface or phone-to-node forwarding has been configured yet, and one shared
 AP does not emulate separate physical radio edges or a real wireless mesh.  The
 NetworkManager shared mode may offer upstream connectivity through the host;
 before an offline-only demonstration, explicitly restrict phone traffic to the
-local IILCN routes/services.
+local Xenia routes/services.
 
 ## 2026-09-04 — Phone-to-virtual-node access lab
 
@@ -120,7 +120,7 @@ local IILCN routes/services.
 The runner starts the four-node virtual diamond, attaches n1 to a temporary
 host-side veth link, starts the real node service in n1, and starts a dedicated
 temporary HTTP access proxy.  The proxy maps the hotspot gateway's TCP port 8081
-to n1's service at `172.20.1.2:8080`.  A phone on `IILCN-Lab` can therefore call
+to n1's service at `172.20.1.2:8080`.  A phone on `Xenia-Lab` can therefore call
 `http://10.42.0.1:8081/health` and receive n1's actual API response.
 
 **Why.** The phone cannot directly address an IP that exists only inside a
@@ -132,7 +132,7 @@ the physical LAN or adding general packet-forwarding rules.
 interfaces on Ctrl+C or normal exit.  It currently exposes only n1 and verifies
 phone-to-node HTTP, not phone-to-phone calls or separate physical Wi-Fi edges.
 
-**Physical-phone verification.** A real Android phone joined `IILCN-Lab`,
+**Physical-phone verification.** A real Android phone joined `Xenia-Lab`,
 received the hotspot address range, was configured to remain connected despite
 Android's expected “no Internet” warning, and successfully loaded
 `http://10.42.0.1:8081/health`.  The response identified virtual node n1.  This
@@ -233,11 +233,11 @@ real-time audio or WebSocket-based features would need a different transport.
 
 ## 2026-09-13 — Raspberry Pi Hardware Deployment
 
-**Implemented.** Moved the IILCN mesh network from the simulated Mininet environment to physical hardware using two Raspberry Pis. Cross-compiled the Go `iilcn-node` binary for the ARM64 architecture (`GOOS=linux GOARCH=arm64`). Created deployment scripts (`deploy-to-pi.sh` and `setup-mesh-pi.sh`) to automate provisioning. Configured the built-in Broadcom Wi-Fi chips on both Pis to disconnect from managed networks and join an isolated **IBSS (ad-hoc) cell** on 2.4 GHz Channel 1. Finally, layered the `batman-adv` kernel module over the ad-hoc interfaces (`wlan0`), creating a dynamic Layer 2 mesh network (`bat0`) with IPs `10.20.0.1` and `10.20.0.2`.
+**Implemented.** Moved the Xenia mesh network from the simulated Mininet environment to physical hardware using two Raspberry Pis. Cross-compiled the Go `xenia-node` binary for the ARM64 architecture (`GOOS=linux GOARCH=arm64`). Created deployment scripts (`deploy-to-pi.sh` and `setup-mesh-pi.sh`) to automate provisioning. Configured the built-in Broadcom Wi-Fi chips on both Pis to disconnect from managed networks and join an isolated **IBSS (ad-hoc) cell** on 2.4 GHz Channel 1. Finally, layered the `batman-adv` kernel module over the ad-hoc interfaces (`wlan0`), creating a dynamic Layer 2 mesh network (`bat0`) with IPs `10.20.0.1` and `10.20.0.2`.
 
 **Why.** Mininet veth links and virtual namespaces are excellent for rapid iteration, but they cannot simulate real-world radio characteristics, driver quirks, or the physical constraints of an isolated edge environment. Deploying to real hardware proves that the architecture is viable for a decentralized field deployment without external infrastructure.
 
-**Verification.** Verified that `batctl n` successfully discovered the peer Pi over the ad-hoc Wi-Fi link. Started the `iilcn-node` service on both Pis and executed `curl` commands directly against the node APIs. Demonstrated that a JSON payload sent to Pi 1 was instantly routed over the airwaves via the BATMAN protocol to Pi 2, where it was successfully buffered and served via HTTP.
+**Verification.** Verified that `batctl n` successfully discovered the peer Pi over the ad-hoc Wi-Fi link. Started the `xenia-node` service on both Pis and executed `curl` commands directly against the node APIs. Demonstrated that a JSON payload sent to Pi 1 was instantly routed over the airwaves via the BATMAN protocol to Pi 2, where it was successfully buffered and served via HTTP.
 
 **Limit.** The built-in Wi-Fi chip (`wlan0`) is currently consumed entirely by the ad-hoc mesh. Because standard unrooted Android phones refuse to connect to ad-hoc networks, an end-user cannot natively connect their phone directly to a Pi node yet. A physical deployment requires a second Wi-Fi interface (e.g., a USB Wi-Fi adapter) to broadcast a standard Wi-Fi Access Point (`wlan1`) for client phones to connect to.
 

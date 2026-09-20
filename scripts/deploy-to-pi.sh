@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deploy IILCN node binary to a Raspberry Pi via scp.
+# Deploy Xenia node binary to a Raspberry Pi via scp.
 # Usage: ./scripts/deploy-to-pi.sh <user@host> [password]
 set -euo pipefail
 
@@ -7,7 +7,7 @@ PI_SSH="${1:?Usage: deploy-to-pi.sh <user@host> [password]}"
 PI_PASS="${2:-}"
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-BINARY="$project_root/bin/pi/iilcn-node"
+BINARY="$project_root/bin/pi/xenia-node"
 if [ ! -f "$BINARY" ]; then
   echo "ERROR: Pi binary not found. Run: scripts/build-pi.sh first"
   exit 1
@@ -20,9 +20,9 @@ if [ -n "$PI_PASS" ]; then
   SSH_CMD="sshpass -p '$PI_PASS' $SSH_CMD"
 fi
 
-echo "==> Deploying iilcn-node to $PI_SSH..."
-eval $SCP_CMD "$BINARY" "$PI_SSH:/tmp/iilcn-node"
-eval $SSH_CMD "$PI_SSH" "chmod +x /tmp/iilcn-node && echo 'Binary deployed to /tmp/iilcn-node'"
+echo "==> Deploying xenia-node to $PI_SSH..."
+eval $SCP_CMD "$BINARY" "$PI_SSH:/tmp/xenia-node"
+eval $SSH_CMD "$PI_SSH" "chmod +x /tmp/xenia-node && echo 'Binary deployed to /tmp/xenia-node'"
 
 echo "==> Installing batctl..."
 eval $SSH_CMD "$PI_SSH" "sudo apt-get install -y batctl 2>/dev/null || echo 'batctl install failed — may need manual install'"

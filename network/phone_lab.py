@@ -42,8 +42,8 @@ N3_MESH_ADDR = "10.10.23.2:8080"
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--node-binary", required=True, help="path to the built iilcn-node binary")
-    parser.add_argument("--proxy-binary", required=True, help="path to the built IILCN access proxy")
+    parser.add_argument("--node-binary", required=True, help="path to the built xenia-node binary")
+    parser.add_argument("--proxy-binary", required=True, help="path to the built Xenia access proxy")
     args = parser.parse_args()
 
     net = Mininet(controller=None, build=False, autoSetMacs=True)
@@ -52,8 +52,8 @@ def main():
     mesh_links = {name: add_link(net, name) for name in ("n1-n2", "n2-n3", "n3-n4", "n4-n1")}
 
     # Access links: host <-> n1, host <-> n3
-    access_n1 = net.addLink(nodes["n1"], gateway, cls=Link, intfName1="n1-access0", intfName2="iilcn-gw0")
-    access_n3 = net.addLink(nodes["n3"], gateway, cls=Link, intfName1="n3-access0", intfName2="iilcn-gw1")
+    access_n1 = net.addLink(nodes["n1"], gateway, cls=Link, intfName1="n1-access0", intfName2="xenia-gw0")
+    access_n3 = net.addLink(nodes["n3"], gateway, cls=Link, intfName1="n3-access0", intfName2="xenia-gw1")
 
     proxies = []
     try:
@@ -71,14 +71,14 @@ def main():
 
         # Start node services with mesh-internal peer URLs.
         nodes["n1"].cmd(
-            f"rm -rf /tmp/iilcn-n1-data && mkdir -p /tmp/iilcn-n1-data && "
+            f"rm -rf /tmp/xenia-n1-data && mkdir -p /tmp/xenia-n1-data && "
             f"{args.node_binary} --node-id n1 --listen 0.0.0.0:8080 "
-            f"--peer-url http://{N3_MESH_ADDR} --storage-dir /tmp/iilcn-n1-data >/tmp/iilcn-n1.log 2>&1 &"
+            f"--peer-url http://{N3_MESH_ADDR} --storage-dir /tmp/xenia-n1-data >/tmp/xenia-n1.log 2>&1 &"
         )
         nodes["n3"].cmd(
-            f"rm -rf /tmp/iilcn-n3-data && mkdir -p /tmp/iilcn-n3-data && "
+            f"rm -rf /tmp/xenia-n3-data && mkdir -p /tmp/xenia-n3-data && "
             f"{args.node_binary} --node-id n3 --listen 0.0.0.0:8080 "
-            f"--peer-url http://{N1_MESH_ADDR} --storage-dir /tmp/iilcn-n3-data >/tmp/iilcn-n3.log 2>&1 &"
+            f"--peer-url http://{N1_MESH_ADDR} --storage-dir /tmp/xenia-n3-data >/tmp/xenia-n3.log 2>&1 &"
         )
 
         # Wait for both services to become healthy.
@@ -89,7 +89,7 @@ def main():
                     break
                 time.sleep(0.2)
             else:
-                log = nodes[label].cmd(f"cat /tmp/iilcn-{label}.log")
+                log = nodes[label].cmd(f"cat /tmp/xenia-{label}.log")
                 raise RuntimeError(f"{label} service did not start: {log}")
 
         # Start two reverse proxies: port 8081 -> n1, port 8083 -> n3.
@@ -112,7 +112,7 @@ def main():
                 raise RuntimeError("A phone access proxy did not start")
 
         print("=" * 60)
-        print("  IILCN Two-Phone Lab is running!")
+        print("  Xenia Two-Phone Lab is running!")
         print("=" * 60)
         print()
         print("  You can now access the lab from ANY network interface.")
