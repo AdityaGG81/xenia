@@ -241,6 +241,59 @@ real-time audio or WebSocket-based features would need a different transport.
 
 **Limit.** The built-in Wi-Fi chip (`wlan0`) is currently consumed entirely by the ad-hoc mesh. Because standard unrooted Android phones refuse to connect to ad-hoc networks, an end-user cannot natively connect their phone directly to a Pi node yet. A physical deployment requires a second Wi-Fi interface (e.g., a USB Wi-Fi adapter) to broadcast a standard Wi-Fi Access Point (`wlan1`) for client phones to connect to.
 
+## 2026-10-17 — WebSocket identity, presence, chat, and call transport
+
+**Implemented.** Replaced the earlier HTTP-polling client/service path with a
+WebSocket client and server. The client registers a device UUID, keeps it in
+browser storage, reconnects automatically, sends five-second heartbeats, and
+deduplicates messages by ID. The server persists identity mappings when a
+storage directory is configured, marks silent sessions offline after fifteen
+seconds, and synchronizes presence and messages with discovered peers. The PWA
+is embedded in the node binary. The browser now exchanges WebRTC SDP and ICE
+signalling and can establish a peer-to-peer audio connection. HTTPS flags were
+added because phone browsers require a trusted secure context for microphone
+access.
+
+**Why.** Polling caused delayed presence and message updates, while username-
+only registration caused a new session on every page load. A stable device
+identity plus a single WebSocket session provides the transport needed for
+presence, chat, and WebRTC negotiation.
+
+**Verification.** The React production bundle builds successfully. The Go unit
+and integration checks and physical-phone audio flow have not yet been run for
+this refactor.
+
+**Limit.** The registration store allows one device per username on each node.
+Manual node launches can omit internal API authentication; the Pi setup now
+configures a shared mesh token. WebRTC has no STUN/TURN server, so calls require
+direct ICE reachability. The project’s older REST tests and HTTP-polling docs
+need to be migrated to the new protocol.
+
+## 2026-10-17 — Raspberry Pi BATMAN-adv setup added (hardware validation pending)
+
+**Implemented.** Added `scripts/setup-mesh-pi.sh` to configure a WPA2 IBSS
+backhaul on one Wi-Fi adapter, attach it to BATMAN-adv, bridge `bat0` to a
+separate phone access point, assign unique mesh IPs, and start the node/PWA
+through systemd. Added `scripts/mesh-status.sh` and updated
+`scripts/restore-network.sh`. The previous `setup-offline-node.sh` entry point
+now forwards to the mesh setup instead of configuring a parent/uplink tree.
+
+**Why.** The earlier chained AP/client configuration required fixed parent IDs
+and did not create a dynamic mesh. BATMAN-adv provides Layer 2 path selection
+between any reachable radio neighbors. Bridging the phone APs onto that Layer 2
+allows phones to contact other mesh nodes directly for WebRTC media.
+
+**Verification.** Shell syntax checks pass. This setup was not run on a
+Raspberry Pi, and no radio, DHCP-over-bridge, multi-hop, or link-failure
+behavior is claimed as verified.
+
+**Hardware requirements and limits.** Each node needs two separate radios. The
+default mapping uses external `wlan1` for mesh IBSS and built-in `wlan0` for the
+phone AP; the external adapter does not need AP support. All nodes must use the
+same mesh channel, mesh ID, and WPA2 passphrase. The
+first hardware milestone is to validate two nodes, phone DHCP on both APs,
+`batctl` neighbor/originator state, messaging, then direct cross-node audio.
+
 ## Planned sequence
 
 1. ~~Run one node service per virtual node and implement inter-node

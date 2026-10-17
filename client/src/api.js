@@ -1,78 +1,59 @@
 export class NodeAPI {
   constructor(baseUrl) {
-    // Strip trailing slashes
-    this.baseUrl = baseUrl.replace(/\/$/, '');
+    const parsed = new URL(baseUrl);
+    if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('Use an HTTP or HTTPS node address.');
+    if (parsed.username || parsed.password || parsed.search || parsed.hash || (parsed.pathname !== '/' && parsed.pathname !== '')) {
+      throw new Error('Enter a node address with its host and port only.');
+    }
+    this.baseUrl = parsed.toString().replace(/\/$/, '');
+  }
+
+  async request(path, options) {
+    let response;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    try {
+      response = await fetch(`${this.baseUrl}${path}`, { ...options, signal: controller.signal });
+    } catch (cause) {
+      throw new Error(controller.signal.aborted ? 'The node did not respond in time.' : 'Could not reach the node. Check the address and local Wi-Fi connection.');
+    } finally {
+      clearTimeout(timeout);
+    }
+    if (!response.ok) {
+      let message = `Node request failed (${response.status}).`;
+      try { message = (await response.json()).error || message; } catch { /* Keep fallback. */ }
+      throw new Error(message);
+    }
+    return response;
   }
 
   async health() {
-    const res = await fetch(`${this.baseUrl}/health`);
-    if (!res.ok) throw new Error('Health check failed');
-    return res.json();
+    return (await this.request('/health')).json();
   }
 
-  async presence() {
-    const res = await fetch(`${this.baseUrl}/users`);
-    if (!res.ok) throw new Error('Failed to fetch presence');
-    return res.json();
-  }
-
-  async setPresence(userId, status = 'online') {
-    const res = await fetch(`${this.baseUrl}/presence`, {
+  async register(username, deviceId = '') {
+    const response = await this.request('/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ user_id: userId, status })
+      body: JSON.stringify({ username, device_id: deviceId || undefined }),
     });
-    if (!res.ok) throw new Error('Failed to set presence');
-    return res.json();
+    return response.json();
   }
 
-  async getMessages(userId) {
-    const res = await fetch(`${this.baseUrl}/messages/${userId}`);
-    if (!res.ok) throw new Error('Failed to fetch messages');
-    const data = await res.json();
-    return data.messages || [];
-  }
-
-  async sendMessage(from, to, body) {
-    const res = await fetch(`${this.baseUrl}/message`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from, to, body })
-    });
-    if (!res.ok) throw new Error('Failed to send message');
-    return res.json();
-  }
-
-  // Call Signalling
-  async createCall(from, to) {
-    const res = await fetch(`${this.baseUrl}/call`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from, to })
-    });
-    if (!res.ok) throw new Error('Failed to create call');
-    return res.json();
-  }
-
-  async updateCallState(callId, state) {
-    const res = await fetch(`${this.baseUrl}/calls/${callId}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ accepted: state === 'accepted' })
-    });
-    if (!res.ok) throw new Error('Failed to update call state');
-    return res.json();
-  }
-
-  async getCalls() {
-    const res = await fetch(`${this.baseUrl}/calls`);
-    if (!res.ok) throw new Error('Failed to fetch calls');
-    return res.json();
-  }
-
-  async getCall(callId) {
-    const res = await fetch(`${this.baseUrl}/call/${callId}`);
-    if (!res.ok) throw new Error('Failed to fetch call state');
-    return res.json();
+  openSocket(deviceId, handlers = {}) {
+    const url = new URL(this.baseUrl);
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    url.pathname = `${url.pathname.replace(/\/$/, '')}/ws`;
+    url.search = new URLSearchParams({ device_id: deviceId }).toString();
+    const socket = new WebSocket(url);
+    socket.onopen = handlers.onOpen;
+    socket.onclose = handlers.onClose;
+    socket.onerror = handlers.onError;
+    socket.onmessage = (event) => {
+      try { handlers.onMessage?.(JSON.parse(event.data)); } catch (error) {
+        console.error('Invalid node event', error);
+      }
+    };
+    return socket;
   }
 }

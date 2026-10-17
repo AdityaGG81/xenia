@@ -51,3 +51,28 @@ automatic failover.
 **Relation to Raspberry Pi deployment.** Real Pi nodes will need dynamic mesh
 routing, route convergence testing, and persistence rules.  Those are outside
 this baseline.
+
+## ADR-003: Use BATMAN-adv over an IBSS backhaul
+
+**Decision.** The Raspberry Pi deployment uses BATMAN-adv at Layer 2 over a
+WPA2 protected 2.4 GHz IBSS backhaul. A separate Wi-Fi radio runs a phone AP;
+the AP and `bat0` join a Linux bridge. Each node has a unique `10.20.<id>.1`
+address and DHCP clients receive addresses from a node-specific range in the
+shared mesh prefix.
+
+**Why.** Nodes can peer with any radio neighbor and BATMAN-adv selects paths
+across multiple hops, instead of requiring a parent node ID or manually
+configured routes. Bridging the phone APs to the mesh gives phones direct
+Layer 2 reachability for WebRTC media as well as access to their local node.
+
+**Hardware constraint.** Concurrent mesh backhaul and phone AP operation uses
+two distinct Wi-Fi radios. By default, the external `wlan1` adapter provides
+IBSS for mesh and the built-in `wlan0` provides AP mode for phones. The external
+adapter does not need AP support. The installer checks each radio only for its
+assigned mode before changing networking. A compatible driver and radio are
+required; software cannot enable a mode the adapter does not provide.
+
+**Limitations.** The setup scripts and address plan are implemented but have
+not been run on Raspberry Pi hardware. Channel selection, client DHCP across
+multiple bridged nodes, mesh encryption interoperability, route convergence,
+radio recovery, and cross-node calls remain hardware validation items.
