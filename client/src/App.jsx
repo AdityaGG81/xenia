@@ -3,8 +3,8 @@ import { NodeAPI } from './api';
 import './App.css'; // We'll replace this with our own layout styles if needed
 
 function ConnectionScreen({ onConnect }) {
-  const [url, setUrl] = useState('http://192.168.1.5:8081');
-  const [username, setUsername] = useState('alice');
+  const [url, setUrl] = useState(window.location.origin);
+  const [username, setUsername] = useState('aditya');
   const [error, setError] = useState('');
   const [connecting, setConnecting] = useState(false);
 
@@ -38,22 +38,14 @@ function ConnectionScreen({ onConnect }) {
         
         <form onSubmit={handleConnect}>
           <div className="input-group">
-            <label>Node URL</label>
-            <input 
-              type="text" 
-              value={url} 
-              onChange={e => setUrl(e.target.value)}
-              placeholder="http://192.168.1.5:8081"
-            />
-          </div>
-          
-          <div className="input-group">
-            <label>Username</label>
+            <label>Your Name</label>
             <input 
               type="text" 
               value={username} 
               onChange={e => setUsername(e.target.value)}
-              placeholder="e.g. alice"
+              placeholder="e.g. parth"
+              className="user-input"
+              autoFocus
             />
           </div>
           
@@ -229,7 +221,7 @@ function ChatInterface({ api, username, nodeId, onDisconnect }) {
                     <div key={msg.id} className={`message-bubble ${msg.from === username ? 'sent' : 'received'}`}>
                       <div className="message-content">{msg.body}</div>
                       <div className="message-meta">
-                        {new Date(msg.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})} 
+                        {new Date(msg.created_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})} 
                         {msg.from === username && <span className="status-icon"> • {msg.state}</span>}
                       </div>
                     </div>

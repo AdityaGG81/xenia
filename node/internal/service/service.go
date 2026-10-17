@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -48,18 +49,19 @@ type Server struct {
 	presence    map[string]Presence
 	messages    []Message
 	calls       map[string]Call
-	peerURL     string
+	peers       map[string]time.Time
 	http        *http.Client
 	messageNo   uint64
 	storageDir  string
 	storageFile *os.File
+	listenAddr  string
 }
 
 type Option func(*Server)
 
-// WithPeerURL configures the one explicit signalling peer used in this milestone.
-func WithPeerURL(peerURL string) Option {
-	return func(s *Server) { s.peerURL = strings.TrimRight(peerURL, "/") }
+// WithListenAddr configures the HTTP listen address (e.g. "0.0.0.0:8080") so we can broadcast our API url.
+func WithListenAddr(addr string) Option {
+	return func(s *Server) { s.listenAddr = addr }
 }
 
 // WithStorageDir configures the directory for offline message persistence.
@@ -71,7 +73,13 @@ func New(nodeID string, options ...Option) *Server {
 	if strings.TrimSpace(nodeID) == "" {
 		nodeID = "unnamed-node"
 	}
-	s := &Server{nodeID: nodeID, presence: make(map[string]Presence), calls: make(map[string]Call), http: &http.Client{Timeout: 3 * time.Second}}
+	s := &Server{
+		nodeID:   nodeID,
+		presence: make(map[string]Presence),
+		calls:    make(map[string]Call),
+		peers:    make(map[string]time.Time),
+		http:     &http.Client{Timeout: 3 * time.Second},
+	}
 	for _, option := range options {
 		option(s)
 	}
@@ -110,6 +118,90 @@ func New(nodeID string, options ...Option) *Server {
 	}
 
 	return s
+}
+
+// StartUDPDiscovery starts a UDP broadcaster and listener on port 9999.
+func (s *Server) StartUDPDiscovery() {
+	go s.listenUDP()
+	go s.broadcastUDP()
+}
+
+type DiscoveryPacket struct {
+	NodeID string `json:"node_id"`
+	APIURL string `json:"api_url"`
+}
+
+func (s *Server) listenUDP() {
+	addr, err := net.ResolveUDPAddr("udp4", ":9999")
+	if err != nil {
+		log.Printf("udp resolve failed: %v", err)
+		return
+	}
+	conn, err := net.ListenUDP("udp4", addr)
+	if err != nil {
+		log.Printf("udp listen failed: %v", err)
+		return
+	}
+	defer conn.Close()
+
+	buf := make([]byte, 1024)
+	for {
+		n, _, err := conn.ReadFromUDP(buf)
+		if err == nil {
+			var packet DiscoveryPacket
+			if err := json.Unmarshal(buf[:n], &packet); err == nil {
+				if packet.NodeID != s.nodeID && packet.APIURL != "" {
+					s.mu.Lock()
+					s.peers[packet.APIURL] = time.Now()
+					s.mu.Unlock()
+				}
+			}
+		}
+	}
+}
+
+func (s *Server) broadcastUDP() {
+	apiURL := "http://" + s.listenAddr
+	if strings.HasPrefix(s.listenAddr, ":") {
+		apiURL = "http://localhost" + s.listenAddr
+	} else if strings.HasPrefix(s.listenAddr, "0.0.0.0:") {
+		if addrs, err := net.InterfaceAddrs(); err == nil {
+			for _, a := range addrs {
+				if ipnet, ok := a.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+					if ipnet.IP.To4() != nil {
+						apiURL = "http://" + ipnet.IP.String() + ":" + strings.Split(s.listenAddr, ":")[1]
+						break
+					}
+				}
+			}
+		}
+	}
+
+	packet := DiscoveryPacket{NodeID: s.nodeID, APIURL: apiURL}
+	b, _ := json.Marshal(packet)
+
+	for {
+		if addrs, err := net.InterfaceAddrs(); err == nil {
+			for _, a := range addrs {
+				if ipnet, ok := a.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+					ip := ipnet.IP.To4()
+					if ip != nil {
+						mask := ipnet.Mask
+						bcast := make(net.IP, 4)
+						for i := 0; i < 4; i++ {
+							bcast[i] = ip[i] | ^mask[i]
+						}
+						addr, _ := net.ResolveUDPAddr("udp4", bcast.String()+":9999")
+						if conn, err := net.DialUDP("udp4", nil, addr); err == nil {
+							conn.Write(b)
+							conn.Close()
+						}
+					}
+				}
+			}
+		}
+		time.Sleep(3 * time.Second)
+	}
 }
 
 // appendMessageLog must be called with s.mu held.
@@ -155,20 +247,23 @@ func (s *Server) createCall(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "from and to are required")
 		return
 	}
-	if s.peerURL == "" {
-		writeError(w, http.StatusServiceUnavailable, "no signalling peer configured")
-		return
-	}
 	now := time.Now().UTC()
 	s.mu.Lock()
 	s.messageNo++
 	call := Call{ID: fmt.Sprintf("%s-call-%d", s.nodeID, s.messageNo), From: request.From, To: request.To, State: "ringing", CreatedAt: now, UpdatedAt: now}
 	s.calls[call.ID] = call
 	s.mu.Unlock()
-	if err := s.sendJSON(http.MethodPost, s.peerURL+"/internal/calls", call); err != nil {
-		writeError(w, http.StatusBadGateway, "could not relay call: "+err.Error())
-		return
+	
+	s.mu.RLock()
+	peers := s.activePeers()
+	s.mu.RUnlock()
+
+	for _, peer := range peers {
+		if err := s.sendJSON(http.MethodPost, peer+"/internal/calls", call); err != nil {
+			log.Printf("could not relay call to %s: %v", peer, err)
+		}
 	}
+	
 	writeJSON(w, http.StatusAccepted, call)
 }
 
@@ -235,14 +330,17 @@ func (s *Server) answerCall(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "call not found")
 		return
 	}
-	if s.peerURL == "" {
-		writeError(w, http.StatusServiceUnavailable, "no signalling peer configured")
-		return
+	
+	s.mu.RLock()
+	peers := s.activePeers()
+	s.mu.RUnlock()
+	
+	for _, peer := range peers {
+		if err := s.sendJSON(http.MethodPost, peer+"/internal/calls/"+url.PathEscape(id)+"/state", map[string]string{"state": call.State}); err != nil {
+			log.Printf("could not relay call state to %s: %v", peer, err)
+		}
 	}
-	if err := s.sendJSON(http.MethodPost, s.peerURL+"/internal/calls/"+url.PathEscape(id)+"/state", map[string]string{"state": call.State}); err != nil {
-		writeError(w, http.StatusBadGateway, "could not relay call state: "+err.Error())
-		return
-	}
+	
 	writeJSON(w, http.StatusOK, call)
 }
 
@@ -270,6 +368,18 @@ func (s *Server) receiveCallState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, call)
+}
+
+// activePeers returns a slice of currently active peers (seen in last 30s)
+func (s *Server) activePeers() []string {
+	var peers []string
+	now := time.Now()
+	for url, lastSeen := range s.peers {
+		if now.Sub(lastSeen) < 30*time.Second {
+			peers = append(peers, url)
+		}
+	}
+	return peers
 }
 
 func (s *Server) sendJSON(method, endpoint string, payload any) error {
@@ -324,12 +434,13 @@ func (s *Server) setPresence(w http.ResponseWriter, r *http.Request) {
 	presence := Presence{UserID: request.UserID, Status: request.Status, UpdatedAt: time.Now().UTC()}
 	s.mu.Lock()
 	s.presence[presence.UserID] = presence
+	peers := s.activePeers()
 	s.mu.Unlock()
 
 	go func() {
-		if s.peerURL != "" {
-			if err := s.sendJSON("POST", s.peerURL+"/internal/presence", presence); err != nil {
-				log.Printf("node %s: failed to forward presence to peer: %v", s.nodeID, err)
+		for _, peer := range peers {
+			if err := s.sendJSON("POST", peer+"/internal/presence", presence); err != nil {
+				log.Printf("node %s: failed to forward presence to %s: %v", s.nodeID, peer, err)
 			}
 		}
 	}()
@@ -376,25 +487,31 @@ func (s *Server) bufferMessage(w http.ResponseWriter, r *http.Request) {
 	s.appendMessageLog(message)
 	s.mu.Unlock()
 
-	// Forward to peer node for delivery if a peer is configured.
-	if s.peerURL != "" {
-		if err := s.sendJSON(http.MethodPost, s.peerURL+"/internal/message", message); err != nil {
-			// Buffered locally but forwarding failed; the message can be retried later.
-			message.State = "buffered"
-			writeJSON(w, http.StatusAccepted, message)
-			return
-		}
-		s.mu.Lock()
-		for i := range s.messages {
-			if s.messages[i].ID == message.ID {
-				s.messages[i].State = "forwarded"
-				s.appendMessageLog(s.messages[i])
-				break
+	// Forward to peer nodes for delivery
+	s.mu.RLock()
+	peers := s.activePeers()
+	s.mu.RUnlock()
+
+	go func() {
+		forwarded := false
+		for _, peer := range peers {
+			if err := s.sendJSON(http.MethodPost, peer+"/internal/message", message); err == nil {
+				forwarded = true
 			}
 		}
-		s.mu.Unlock()
-		message.State = "forwarded"
-	}
+		
+		if forwarded {
+			s.mu.Lock()
+			for i := range s.messages {
+				if s.messages[i].ID == message.ID {
+					s.messages[i].State = "forwarded"
+					s.appendMessageLog(s.messages[i])
+					break
+				}
+			}
+			s.mu.Unlock()
+		}
+	}()
 
 	writeJSON(w, http.StatusAccepted, message)
 }

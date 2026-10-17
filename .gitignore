@@ -8,9 +8,12 @@ node/bin/
 */__pycache__/
 *.pyc
 
-# Node modules (PWA)
+# Node modules and build output (frontend)
 client/node_modules/
 client/dist/
+
+# Embedded static files (generated at build time)
+node/cmd/xenia-node/www/
 
 # Logs and scratch
 logs/
@@ -19,4 +22,4 @@ scratch/
 .env
 
 # Storage files
-/tmp/xenia-storage*
+xenia-storage*/
