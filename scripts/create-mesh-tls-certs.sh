@@ -18,7 +18,7 @@ if [[ ! -f "$OUT_DIR/ca.key" || ! -f "$OUT_DIR/ca.crt" ]]; then
     -addext "subjectKeyIdentifier=hash"
 fi
 
-for node_id in 1 2; do
+for node_id in 1 2 3 4; do
   node_ip="10.20.${node_id}.1"
   request="$OUT_DIR/node${node_id}.csr"
   extensions="$OUT_DIR/node${node_id}.ext"
@@ -29,7 +29,7 @@ for node_id in 1 2; do
 basicConstraints=critical,CA:FALSE
 keyUsage=critical,digitalSignature,keyEncipherment
 extendedKeyUsage=serverAuth
-subjectAltName=IP:${node_ip},IP:10.20.1.1,IP:10.20.2.1,DNS:xenia.mesh,DNS:*.xenia.mesh,DNS:xenia.local,DNS:*.xenia.local
+subjectAltName=IP:${node_ip},IP:10.20.1.1,IP:10.20.2.1,IP:10.20.3.1,DNS:xenia.mesh,DNS:*.xenia.mesh,DNS:xenia.local,DNS:*.xenia.local
 EOF
   openssl x509 -req -in "$request" -CA "$OUT_DIR/ca.crt" \
     -CAkey "$OUT_DIR/ca.key" -CAcreateserial -out "$OUT_DIR/node${node_id}.crt" \
@@ -37,7 +37,7 @@ EOF
   rm -f "$request" "$extensions"
 done
 
-chmod 0600 "$OUT_DIR/ca.key" "$OUT_DIR/node1.key" "$OUT_DIR/node2.key"
-chmod 0644 "$OUT_DIR/ca.crt" "$OUT_DIR/node1.crt" "$OUT_DIR/node2.crt"
-echo "Created a private local CA and node certificates in $OUT_DIR."
+chmod 0600 "$OUT_DIR"/*.key
+chmod 0644 "$OUT_DIR"/*.crt
+echo "Created a private local CA and node certificates in $OUT_DIR for nodes 1-4."
 echo "Keep ca.key private. Copy only ca.crt and each Pi's matching node certificate/key to that Pi."

@@ -43,21 +43,30 @@ if [[ ! -x "$NODE_BIN" ]]; then echo "Expected executable Pi binary: $NODE_BIN" 
 for command in iw ip hostapd dnsmasq wpa_supplicant wpa_cli systemctl sysctl iptables; do
   command -v "$command" >/dev/null || { echo "Missing command: $command (install with: apt-get install -y $command)" >&2; exit 1; }
 done
-for iface in "$MESH_IFACE" "$AP_IFACE"; do
-  [[ -e "/sys/class/net/$iface/phy80211" ]] || { echo "Wireless interface missing: $iface" >&2; exit 1; }
-done
-MESH_PHY=$(basename "$(readlink -f "/sys/class/net/$MESH_IFACE/phy80211")")
-AP_PHY=$(basename "$(readlink -f "/sys/class/net/$AP_IFACE/phy80211")")
-[[ "$MESH_PHY" != "$AP_PHY" ]] || { echo "Use separate mesh and AP radios." >&2; exit 1; }
+SINGLE_RADIO=false
+if [[ ! -e "/sys/class/net/$MESH_IFACE/phy80211" ]]; then
+  if [[ -e "/sys/class/net/$AP_IFACE/phy80211" ]]; then
+    SINGLE_RADIO=true
+    BACKHAUL_MODE="none"
+    echo "Notice: Interface $MESH_IFACE not found. Node ${NODE_ID} will operate as a Single-Radio Mesh AP on $AP_IFACE."
+  else
+    echo "Wireless interface missing: $AP_IFACE" >&2; exit 1
+  fi
+else
+  MESH_PHY=$(basename "$(readlink -f "/sys/class/net/$MESH_IFACE/phy80211")")
+  AP_PHY=$(basename "$(readlink -f "/sys/class/net/$AP_IFACE/phy80211")")
+  [[ "$MESH_PHY" != "$AP_PHY" ]] || { echo "Use separate mesh and AP radios." >&2; exit 1; }
 
-# Check backhaul capability: IBSS (BATMAN-adv) vs Managed Client Uplink
-BACKHAUL_MODE="ibss"
-if ! iw phy "$MESH_PHY" info | grep -Eq '^\s+\* IBSS$'; then
-  BACKHAUL_MODE="client"
-  echo "Notice: $MESH_IFACE ($MESH_PHY) does not support IBSS mode."
-  echo "Configuring Managed Wi-Fi Uplink mode for node ${NODE_ID}."
+  # Check backhaul capability: IBSS (BATMAN-adv) vs Managed Client Uplink
+  BACKHAUL_MODE="ibss"
+  if ! iw phy "$MESH_PHY" info | grep -Eq '^\s+\* IBSS$'; then
+    BACKHAUL_MODE="client"
+    echo "Notice: $MESH_IFACE ($MESH_PHY) does not support IBSS mode."
+    echo "Configuring Managed Wi-Fi Uplink mode for node ${NODE_ID}."
+  fi
 fi
 
+AP_PHY=$(basename "$(readlink -f "/sys/class/net/$AP_IFACE/phy80211")")
 iw phy "$AP_PHY" info | grep -Eq '^\s+\* AP$' || { echo "$AP_IFACE lacks AP mode." >&2; exit 1; }
 
 if [[ "$BACKHAUL_MODE" == "ibss" ]]; then
@@ -87,7 +96,9 @@ backup_once() {
 backup_once /etc/dhcpcd.conf
 backup_once /etc/dnsmasq.conf
 backup_once /etc/hostapd/hostapd.conf
-backup_once "/etc/wpa_supplicant/wpa_supplicant-${MESH_IFACE}.conf"
+if [[ "$SINGLE_RADIO" == false ]]; then
+  backup_once "/etc/wpa_supplicant/wpa_supplicant-${MESH_IFACE}.conf"
+fi
 
 install -d -m 0710 -o root -g "$NODE_GROUP" /etc/xenia-node
 NODE_ENV_TMP=$(mktemp /etc/xenia-node/node.env.XXXXXX)
@@ -364,7 +375,7 @@ rfkill unblock wlan 2>/dev/null || true
 pkill -9 hostapd 2>/dev/null || true
 systemctl daemon-reload
 
-if [[ "$BACKHAUL_MODE" == "ibss" || NODE_ID -gt 1 ]]; then
+if [[ "$SINGLE_RADIO" == false && ("$BACKHAUL_MODE" == "ibss" || NODE_ID -gt 1) ]]; then
   systemctl restart "wpa_supplicant@${MESH_IFACE}.service"
   systemctl enable "wpa_supplicant@${MESH_IFACE}.service"
 fi
