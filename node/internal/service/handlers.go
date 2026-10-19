@@ -234,13 +234,12 @@ func (s *Server) handleInternalSync(w http.ResponseWriter, r *http.Request) {
 
 	// Merge remote users into our state
 	s.mu.Lock()
+	now := time.Now()
 	for _, u := range req.Users {
 		if u.NodeID != s.nodeID {
 			uCopy := u
-			existing, exists := s.users[u.Username]
-			if !exists || u.LastSeen.After(existing.LastSeen) {
-				s.users[u.Username] = &uCopy
-			}
+			uCopy.LastSeen = now
+			s.users[u.Username] = &uCopy
 		}
 	}
 	localUsers := s.collectOnlineUsers()
@@ -327,6 +326,7 @@ func (s *Server) handleInternalUserEvent(w http.ResponseWriter, r *http.Request)
 		if event.User != nil && event.User.NodeID != s.nodeID {
 			s.mu.Lock()
 			uCopy := *event.User
+			uCopy.LastSeen = time.Now()
 			s.users[event.User.Username] = &uCopy
 			s.mu.Unlock()
 			s.broadcastLocal(event, "")

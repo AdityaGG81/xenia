@@ -36,8 +36,8 @@ import (
 // WebSocket tuning constants.
 const (
 	writeWait          = 10 * time.Second
-	pongWait           = 30 * time.Second
-	pingPeriod         = 10 * time.Second
+	pongWait           = 90 * time.Second
+	pingPeriod         = 30 * time.Second
 	maxMsgSize         = 64 * 1024
 	maxMeshHops        = 8
 	maxSeenSignals     = 4096
@@ -562,7 +562,7 @@ func validateCallSignal(msg *WSMessage) error {
 	return nil
 }
 
-// reapUsers marks local sessions offline when three five-second heartbeats are missed.
+// reapUsers marks local sessions offline when heartbeats are missed for 90 seconds.
 func (s *Server) reapUsers() {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
@@ -574,7 +574,7 @@ func (s *Server) reapUsers() {
 			var expired []*Client
 			s.mu.RLock()
 			for _, client := range s.clients {
-				if user := s.users[client.username]; user != nil && now.Sub(user.LastSeen) > 15*time.Second {
+				if user := s.users[client.username]; user != nil && now.Sub(user.LastSeen) > 90*time.Second {
 					expired = append(expired, client)
 				}
 			}
@@ -1001,13 +1001,17 @@ func (s *Server) syncWithPeer(peerURL string) {
 
 	s.mu.Lock()
 	changed := false
+	now := time.Now()
 	for _, u := range peerResp.Users {
 		if u.NodeID != s.nodeID {
 			uCopy := u
+			uCopy.LastSeen = now
 			existing, exists := s.users[u.Username]
-			if !exists || u.LastSeen.After(existing.LastSeen) {
+			if !exists || !existing.Online || existing.DeviceID != uCopy.DeviceID {
 				s.users[u.Username] = &uCopy
 				changed = true
+			} else {
+				s.users[u.Username].LastSeen = now
 			}
 		}
 	}
@@ -1257,18 +1261,18 @@ func (s *Server) periodicSync() {
 			}
 			s.retryPendingMessages()
 
-			// Expire stale remote users (not seen by their home node for >45s)
+			// Expire stale remote users (not seen by their home node for >90s)
 			s.mu.Lock()
 			now := time.Now()
 			presenceChanged := false
 			for username, user := range s.users {
-				if user.NodeID != s.nodeID && now.Sub(user.LastSeen) > 45*time.Second {
+				if user.NodeID != s.nodeID && now.Sub(user.LastSeen) > 90*time.Second {
 					delete(s.users, username)
 					presenceChanged = true
 				}
 			}
 			for peerURL, peer := range s.peers {
-				if now.Sub(peer.LastSeen) > 45*time.Second {
+				if now.Sub(peer.LastSeen) > 90*time.Second {
 					delete(s.peers, peerURL)
 				}
 			}
@@ -1318,6 +1322,7 @@ func (c *Client) readPump() {
 			}
 			return
 		}
+		c.conn.SetReadDeadline(time.Now().Add(pongWait))
 		var msg WSMessage
 		if json.Unmarshal(data, &msg) != nil {
 			continue

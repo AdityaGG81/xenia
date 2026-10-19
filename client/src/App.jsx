@@ -92,9 +92,6 @@ function ChatInterface({ api, username, deviceId, nodeId, storageState, identity
   const [incomingCall, setIncomingCall] = useState(null);
   const [callStatus, setCallStatus] = useState('');
   const [remoteStream, setRemoteStream] = useState(null);
-  const [volumeBoost, setVolumeBoost] = useState(2.5);
-  const audioContextRef = useRef(null);
-  const gainNodeRef = useRef(null);
   const [actionError, setActionError] = useState('');
   const socketRef = useRef(null);
   const peerRef = useRef(null);
@@ -157,11 +154,6 @@ function ChatInterface({ api, username, deviceId, nodeId, storageState, identity
     pendingCandidates.current.clear();
     localCandidateQueue.current = [];
     localCandidatesReady.current = false;
-    if (audioContextRef.current) {
-      audioContextRef.current.close().catch(() => {});
-      audioContextRef.current = null;
-      gainNodeRef.current = null;
-    }
     if (audioRef.current) audioRef.current.srcObject = null;
   }, []);
 
@@ -192,9 +184,16 @@ function ChatInterface({ api, username, deviceId, nodeId, storageState, identity
   }, [send]);
 
   const makePeer = useCallback((peerName) => {
-    const stunHost = window.location.hostname || '10.20.1.1';
+    const stunUrls = [
+      'stun:10.20.1.1:3478',
+      'stun:10.20.2.1:3478',
+      'stun:10.20.3.1:3478',
+    ];
+    if (window.location.hostname && !stunUrls.some(u => u.includes(window.location.hostname))) {
+      stunUrls.push(`stun:${window.location.hostname}:3478`);
+    }
     const pc = new RTCPeerConnection({
-      iceServers: [{ urls: `stun:${stunHost}:3478` }],
+      iceServers: [{ urls: stunUrls }],
       iceCandidatePoolSize: 4
     });
     peerRef.current = pc;
@@ -212,6 +211,10 @@ function ChatInterface({ api, username, deviceId, nodeId, storageState, identity
     pc.ontrack = event => {
       const stream = event.streams?.[0] || new MediaStream([event.track]);
       setRemoteStream(stream);
+      if (audioRef.current) {
+        audioRef.current.srcObject = stream;
+        audioRef.current.play().catch(() => {});
+      }
     };
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === 'connected') setCallStatus('Connected');
@@ -344,13 +347,13 @@ function ChatInterface({ api, username, deviceId, nodeId, storageState, identity
         onClose: () => {
           clearInterval(heartbeatTimer);
           if (!disposed) {
-            const callWasActive = Boolean(peerRef.current || incomingCallRef.current);
-            if (callWasActive) {
+            // Only drop call if signaling was still in setup phase (not yet connected)
+            if (peerRef.current && peerRef.current.connectionState !== 'connected') {
               closeCall();
               setCallStatus('Call ended because signaling disconnected.');
             }
             setSocketState('reconnecting');
-            const delay = Math.min(1000 * (2 ** attempts), 30000) + Math.random() * 500;
+            const delay = Math.min(1000 * (2 ** attempts), 10000) + Math.random() * 300;
             attempts += 1;
             reconnectTimer = setTimeout(open, delay);
           }
@@ -384,47 +387,26 @@ function ChatInterface({ api, username, deviceId, nodeId, storageState, identity
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, selectedUser]);
   useEffect(() => {
     if (!remoteStream) {
-      if (audioContextRef.current) {
-        audioContextRef.current.close().catch(() => {});
-        audioContextRef.current = null;
-        gainNodeRef.current = null;
-      }
       if (audioRef.current) audioRef.current.srcObject = null;
       return;
-    }
-
-    try {
-      const AudioCtx = window.AudioContext || window.webkitAudioContext;
-      if (AudioCtx) {
-        const ctx = new AudioCtx();
-        audioContextRef.current = ctx;
-        if (ctx.state === 'suspended') {
-          ctx.resume().catch(() => {});
-        }
-        const source = ctx.createMediaStreamSource(remoteStream);
-        const gainNode = ctx.createGain();
-        gainNode.gain.value = volumeBoost;
-        gainNodeRef.current = gainNode;
-        const dest = ctx.createMediaStreamDestination();
-        source.connect(gainNode);
-        gainNode.connect(dest);
-        if (audioRef.current) {
-          audioRef.current.srcObject = dest.stream;
-          audioRef.current.volume = 1.0;
-          audioRef.current.play().catch(() => {});
-        }
-        return;
-      }
-    } catch (e) {
-      console.warn('Web Audio gain processing fallback to direct stream', e);
     }
 
     if (audioRef.current) {
       audioRef.current.srcObject = remoteStream;
       audioRef.current.volume = 1.0;
-      audioRef.current.play().catch(() => {});
+      audioRef.current.play().catch(cause => console.warn('Audio playback error:', cause));
     }
-  }, [remoteStream, volumeBoost]);
+  }, [remoteStream]);
+
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible' && socketRef.current?.readyState === WebSocket.OPEN) {
+        socketRef.current.send(JSON.stringify({ type: 'heartbeat' }));
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => document.removeEventListener('visibilitychange', handleVisibility);
+  }, []);
 
   const sendMessage = (event) => {
     event.preventDefault();
@@ -447,6 +429,7 @@ function ChatInterface({ api, username, deviceId, nodeId, storageState, identity
 
   const startCall = async () => {
     if (!selectedUser || callBusyRef.current || peerRef.current || incomingCallRef.current) return;
+    if (audioRef.current) audioRef.current.play().catch(() => {});
     callBusyRef.current = true;
     const generation = ++callGenerationRef.current;
     setCallStatus('Requesting microphone…');
@@ -480,6 +463,7 @@ function ChatInterface({ api, username, deviceId, nodeId, storageState, identity
   const answerCall = async () => {
     const pendingCall = incomingCallRef.current;
     if (!pendingCall || !callBusyRef.current || answeringCallRef.current || peerRef.current) return;
+    if (audioRef.current) audioRef.current.play().catch(() => {});
     answeringCallRef.current = true;
     const generation = ++callGenerationRef.current;
     try {
@@ -545,21 +529,6 @@ function ChatInterface({ api, username, deviceId, nodeId, storageState, identity
                 <button className="btn-reject" onClick={endCall}>Decline</button>
               </div>
             </>
-          )}
-          {remoteStream && (
-            <div className="volume-controls">
-              <span className="volume-label">🔊 Volume Boost:</span>
-              {[1, 2, 3, 4].map(level => (
-                <button
-                  key={level}
-                  type="button"
-                  className={`btn-boost ${volumeBoost === level ? 'active' : ''}`}
-                  onClick={() => setVolumeBoost(level)}
-                >
-                  {level}x
-                </button>
-              ))}
-            </div>
           )}
           <button className="btn-reject" onClick={endCall}>{callIsActive ? 'End call' : 'Dismiss'}</button>
         </div>

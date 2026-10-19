@@ -274,6 +274,10 @@ case "${1:-start}" in
     ip link show bat0 >/dev/null 2>&1 || ip link add name bat0 type batadv
     batctl meshif bat0 bridge_loop_avoidance 1 2>/dev/null || true
 
+    if [[ -n "$MESH_IFACE" && "$MESH_IFACE" != "$AP_IFACE" && -e "/sys/class/net/$MESH_IFACE" ]]; then
+      ip addr flush dev "$MESH_IFACE" 2>/dev/null || true
+    fi
+
     UNDERLAY_IFACE="$AP_IFACE"
     if (( NODE_ID > 1 )) && [[ -n "$MESH_IFACE" && "$MESH_IFACE" != "$AP_IFACE" && -e "/sys/class/net/$MESH_IFACE" ]]; then
       ip link set "$MESH_IFACE" up
@@ -287,11 +291,11 @@ case "${1:-start}" in
       PEER_SSID=$(wpa_cli -i "$MESH_IFACE" status 2>/dev/null | awk -F= '$1=="ssid"{print $2}')
       if [[ "$PEER_SSID" =~ ^Xenia-([0-9]+)$ ]]; then
         PEER_ID="${BASH_REMATCH[1]}"
-        ip addr flush dev "$MESH_IFACE" 2>/dev/null || true
-        ip addr add "10.20.${PEER_ID}.${NODE_ID}/24" dev "$MESH_IFACE"
+        ip addr add "10.20.${PEER_ID}.$((100 + NODE_ID))/32" dev "$MESH_IFACE" 2>/dev/null || true
+        ip route replace "10.20.${PEER_ID}.1/32" dev "$MESH_IFACE" 2>/dev/null || true
       else
-        ip addr flush dev "$MESH_IFACE" 2>/dev/null || true
-        ip addr add "10.20.1.${NODE_ID}/24" dev "$MESH_IFACE"
+        ip addr add "10.20.1.$((100 + NODE_ID))/32" dev "$MESH_IFACE" 2>/dev/null || true
+        ip route replace "10.20.1.1/32" dev "$MESH_IFACE" 2>/dev/null || true
       fi
       UNDERLAY_IFACE="$MESH_IFACE"
     fi
@@ -302,13 +306,23 @@ case "${1:-start}" in
     ip link set vx0 up
     batctl meshif bat0 interface add vx0 2>/dev/null || true
 
-    # Assign unified mesh IP to bat0
+    # Assign deterministic MAC and unified mesh IP to bat0
+    ip link set bat0 address "02:00:00:00:00:$(printf '%02x' "$NODE_ID")" 2>/dev/null || true
     ip addr flush dev bat0 2>/dev/null || true
     ip addr add "10.20.0.${NODE_ID}/16" dev bat0
     ip link set bat0 up
     ip route replace 10.20.0.0/16 dev bat0 2>/dev/null || true
 
-    # Enable proxy ARP on bat0 and AP interface so routed packets traverse BATMAN seamlessly
+    # Explicit peer routes across BATMAN (all client subnets traverse bat0)
+    for nid in 1 2 3 4; do
+      if (( nid != NODE_ID )); then
+        ip route replace "10.20.${nid}.0/24" via "10.20.0.${nid}" dev bat0 2>/dev/null || true
+      fi
+    done
+
+    # Disable reverse path filtering everywhere and enable IP forwarding & proxy ARP
+    for f in /proc/sys/net/ipv4/conf/*/rp_filter; do echo 0 > "$f" 2>/dev/null || true; done
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
     sysctl -w net.ipv4.conf.bat0.proxy_arp=1 >/dev/null 2>&1 || true
     sysctl -w net.ipv4.conf."$AP_IFACE".proxy_arp=1 >/dev/null 2>&1 || true
     ;;
