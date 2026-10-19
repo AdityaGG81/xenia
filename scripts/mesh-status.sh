@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -u
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 
 echo '--- node service ---'
 systemctl --no-pager --full status xenia-node.service 2>&1 | sed -n '1,16p' || true

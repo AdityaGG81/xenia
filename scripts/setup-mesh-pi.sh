@@ -274,14 +274,8 @@ case "${1:-start}" in
     ip link show bat0 >/dev/null 2>&1 || ip link add name bat0 type batadv
     batctl meshif bat0 bridge_loop_avoidance 1 2>/dev/null || true
 
-    # Overlay VXLAN on AP interface (captures peer clients connecting to our AP)
-    ip link del vx_ap 2>/dev/null || true
-    ip link add vx_ap type vxlan id 42 group 239.255.42.42 dev "$AP_IFACE" dstport 4789
-    ip link set vx_ap up
-    batctl meshif bat0 interface add vx_ap 2>/dev/null || true
-
-    # If separate client radio is present, connect to peer AP and overlay VXLAN
-    if [[ -n "$MESH_IFACE" && "$MESH_IFACE" != "$AP_IFACE" && -e "/sys/class/net/$MESH_IFACE" ]]; then
+    UNDERLAY_IFACE="$AP_IFACE"
+    if (( NODE_ID > 1 )) && [[ -n "$MESH_IFACE" && "$MESH_IFACE" != "$AP_IFACE" && -e "/sys/class/net/$MESH_IFACE" ]]; then
       ip link set "$MESH_IFACE" up
       # Wait up to 15s for wpa_supplicant association
       for _ in $(seq 1 15); do
@@ -295,13 +289,18 @@ case "${1:-start}" in
         PEER_ID="${BASH_REMATCH[1]}"
         ip addr flush dev "$MESH_IFACE" 2>/dev/null || true
         ip addr add "10.20.${PEER_ID}.${NODE_ID}/24" dev "$MESH_IFACE"
+      else
+        ip addr flush dev "$MESH_IFACE" 2>/dev/null || true
+        ip addr add "10.20.1.${NODE_ID}/24" dev "$MESH_IFACE"
       fi
-
-      ip link del vx_sta 2>/dev/null || true
-      ip link add vx_sta type vxlan id 42 group 239.255.42.42 dev "$MESH_IFACE" dstport 4789
-      ip link set vx_sta up
-      batctl meshif bat0 interface add vx_sta 2>/dev/null || true
+      UNDERLAY_IFACE="$MESH_IFACE"
     fi
+
+    # Overlay VXLAN on the backhaul interface for BATMAN-adv
+    ip link del vx0 2>/dev/null || true
+    ip link add vx0 type vxlan id 42 group 239.255.42.42 dev "$UNDERLAY_IFACE" dstport 4789
+    ip link set vx0 up
+    batctl meshif bat0 interface add vx0 2>/dev/null || true
 
     # Assign unified mesh IP to bat0
     ip addr flush dev bat0 2>/dev/null || true
@@ -315,8 +314,7 @@ case "${1:-start}" in
     ;;
   stop)
     ip link set bat0 down 2>/dev/null || true
-    ip link del vx_sta 2>/dev/null || true
-    ip link del vx_ap 2>/dev/null || true
+    ip link del vx0 2>/dev/null || true
     ip link del bat0 type batadv 2>/dev/null || true
     ip addr flush dev "$AP_IFACE" 2>/dev/null || true
     if [[ -n "$MESH_IFACE" && "$MESH_IFACE" != "$AP_IFACE" ]]; then
@@ -337,8 +335,8 @@ chmod 0755 /usr/local/sbin/xenia-mesh-net
 cat > /etc/systemd/system/xenia-mesh-net.service <<EOF
 [Unit]
 Description=Xenia mesh network setup
-$( [[ "$SINGLE_RADIO" == false && "$MESH_IFACE" != "$AP_IFACE" ]] && echo "Requires=wpa_supplicant@${MESH_IFACE}.service" || true )
-$( [[ "$SINGLE_RADIO" == false && "$MESH_IFACE" != "$AP_IFACE" ]] && echo "After=wpa_supplicant@${MESH_IFACE}.service" || true )
+$( [[ "$SINGLE_RADIO" == false && "$MESH_IFACE" != "$AP_IFACE" && NODE_ID -gt 1 ]] && echo "Requires=wpa_supplicant@${MESH_IFACE}.service" || true )
+$( [[ "$SINGLE_RADIO" == false && "$MESH_IFACE" != "$AP_IFACE" && NODE_ID -gt 1 ]] && echo "After=wpa_supplicant@${MESH_IFACE}.service" || true )
 Before=hostapd.service dnsmasq.service xenia-node.service
 
 [Service]
