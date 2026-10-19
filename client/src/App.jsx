@@ -92,6 +92,9 @@ function ChatInterface({ api, username, deviceId, nodeId, storageState, identity
   const [incomingCall, setIncomingCall] = useState(null);
   const [callStatus, setCallStatus] = useState('');
   const [remoteStream, setRemoteStream] = useState(null);
+  const [volumeBoost, setVolumeBoost] = useState(2.5);
+  const audioContextRef = useRef(null);
+  const gainNodeRef = useRef(null);
   const [actionError, setActionError] = useState('');
   const socketRef = useRef(null);
   const peerRef = useRef(null);
@@ -154,6 +157,11 @@ function ChatInterface({ api, username, deviceId, nodeId, storageState, identity
     pendingCandidates.current.clear();
     localCandidateQueue.current = [];
     localCandidatesReady.current = false;
+    if (audioContextRef.current) {
+      audioContextRef.current.close().catch(() => {});
+      audioContextRef.current = null;
+      gainNodeRef.current = null;
+    }
     if (audioRef.current) audioRef.current.srcObject = null;
   }, []);
 
@@ -374,7 +382,49 @@ function ChatInterface({ api, username, deviceId, nodeId, storageState, identity
   }, [api, closeCall, deviceId, handleEvent]);
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, selectedUser]);
-  useEffect(() => { if (audioRef.current && remoteStream) audioRef.current.srcObject = remoteStream; }, [remoteStream]);
+  useEffect(() => {
+    if (!remoteStream) {
+      if (audioContextRef.current) {
+        audioContextRef.current.close().catch(() => {});
+        audioContextRef.current = null;
+        gainNodeRef.current = null;
+      }
+      if (audioRef.current) audioRef.current.srcObject = null;
+      return;
+    }
+
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (AudioCtx) {
+        const ctx = new AudioCtx();
+        audioContextRef.current = ctx;
+        if (ctx.state === 'suspended') {
+          ctx.resume().catch(() => {});
+        }
+        const source = ctx.createMediaStreamSource(remoteStream);
+        const gainNode = ctx.createGain();
+        gainNode.gain.value = volumeBoost;
+        gainNodeRef.current = gainNode;
+        const dest = ctx.createMediaStreamDestination();
+        source.connect(gainNode);
+        gainNode.connect(dest);
+        if (audioRef.current) {
+          audioRef.current.srcObject = dest.stream;
+          audioRef.current.volume = 1.0;
+          audioRef.current.play().catch(() => {});
+        }
+        return;
+      }
+    } catch (e) {
+      console.warn('Web Audio gain processing fallback to direct stream', e);
+    }
+
+    if (audioRef.current) {
+      audioRef.current.srcObject = remoteStream;
+      audioRef.current.volume = 1.0;
+      audioRef.current.play().catch(() => {});
+    }
+  }, [remoteStream, volumeBoost]);
 
   const sendMessage = (event) => {
     event.preventDefault();
@@ -387,6 +437,14 @@ function ChatInterface({ api, username, deviceId, nodeId, storageState, identity
     setDraft('');
   };
 
+  const voiceConstraints = {
+    echoCancellation: { ideal: true },
+    noiseSuppression: { ideal: true },
+    autoGainControl: { ideal: true },
+    channelCount: { ideal: 1 },
+    sampleRate: { ideal: 48000 }
+  };
+
   const startCall = async () => {
     if (!selectedUser || callBusyRef.current || peerRef.current || incomingCallRef.current) return;
     callBusyRef.current = true;
@@ -395,7 +453,7 @@ function ChatInterface({ api, username, deviceId, nodeId, storageState, identity
     try {
       if (!navigator.mediaDevices?.getUserMedia) throw new Error('Audio calls require HTTPS with a trusted certificate on this phone.');
       if (socketRef.current?.readyState !== WebSocket.OPEN) throw new Error('The node is reconnecting. Try the call again when it is online.');
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: voiceConstraints });
       if (generation !== callGenerationRef.current) {
         stream.getTracks().forEach(track => track.stop());
         return;
@@ -427,7 +485,7 @@ function ChatInterface({ api, username, deviceId, nodeId, storageState, identity
     try {
       if (!navigator.mediaDevices?.getUserMedia) throw new Error('Audio calls require HTTPS with a trusted certificate on this phone.');
       if (socketRef.current?.readyState !== WebSocket.OPEN) throw new Error('The node is reconnecting. Try again when it is online.');
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: voiceConstraints });
       if (generation !== callGenerationRef.current || incomingCallRef.current?.call_id !== pendingCall.call_id) {
         stream.getTracks().forEach(track => track.stop());
         return;
@@ -476,7 +534,36 @@ function ChatInterface({ api, username, deviceId, nodeId, storageState, identity
         <aside className="glass-panel sidebar"><h3>Nearby</h3>{contacts.length === 0 ? <p className="empty-text">No other users online</p> : <ul className="user-list">{contacts.map(user => <li key={user.device_id || user.username} className={selectedUser === user.username ? 'active' : ''} onClick={() => setSelectedUser(user.username)}><div className="user-avatar">{user.username[0]?.toUpperCase()}</div><span className="user-name">@{user.username}</span><div className="status-indicator online" /></li>)}</ul>}</aside>
         <main className="glass-panel chat-area">{selectedUser ? <><div className="chat-header"><h3>Chat with @{selectedUser}</h3><button onClick={startCall} className="btn-call" disabled={socketState !== 'online' || Boolean(callStatus)}>📞 Call</button></div>{actionError && <div className="error-message" role="status">{actionError}</div>}<div className="message-list">{conversation.map(message => <div key={message.id} className={`message-bubble ${message.from === username ? 'sent' : 'received'}`}><div className="message-content">{message.body}</div><div className="message-meta">{new Date(message.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · {message.state}</div></div>)}<div ref={bottomRef} /></div><form className="message-composer" onSubmit={sendMessage}><input value={draft} onChange={event => setDraft(event.target.value)} placeholder={socketState === 'online' ? 'Type a message…' : 'Reconnecting…'} disabled={socketState !== 'online'} /><button disabled={!draft.trim() || socketState !== 'online'}>Send</button></form></> : <div className="select-prompt"><div className="icon">💬</div><p>Select someone to start chatting</p>{actionError && <div className="error-message" role="status">{actionError}</div>}</div>}</main>
       </div>
-      {(incomingCall || callStatus) && <div className="call-overlay glass-panel"><h3>{incomingCall ? 'Incoming audio call' : callStatus}</h3>{incomingCall && <><p>from @{incomingCall.from}</p><div className="call-actions"><button className="btn-answer" onClick={answerCall} disabled={socketState !== 'online' || answeringCallRef.current}>Answer</button><button className="btn-reject" onClick={endCall}>Decline</button></div></>}<button className="btn-reject" onClick={endCall}>{callIsActive ? 'End call' : 'Dismiss'}</button></div>}
+      {(incomingCall || callStatus) && (
+        <div className="call-overlay glass-panel">
+          <h3>{incomingCall ? 'Incoming audio call' : callStatus}</h3>
+          {incomingCall && (
+            <>
+              <p>from @{incomingCall.from}</p>
+              <div className="call-actions">
+                <button className="btn-answer" onClick={answerCall} disabled={socketState !== 'online' || answeringCallRef.current}>Answer</button>
+                <button className="btn-reject" onClick={endCall}>Decline</button>
+              </div>
+            </>
+          )}
+          {remoteStream && (
+            <div className="volume-controls">
+              <span className="volume-label">🔊 Volume Boost:</span>
+              {[1, 2, 3, 4].map(level => (
+                <button
+                  key={level}
+                  type="button"
+                  className={`btn-boost ${volumeBoost === level ? 'active' : ''}`}
+                  onClick={() => setVolumeBoost(level)}
+                >
+                  {level}x
+                </button>
+              ))}
+            </div>
+          )}
+          <button className="btn-reject" onClick={endCall}>{callIsActive ? 'End call' : 'Dismiss'}</button>
+        </div>
+      )}
       <audio ref={audioRef} autoPlay playsInline controls={Boolean(remoteStream)} />
     </div>
   );
