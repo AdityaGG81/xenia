@@ -184,17 +184,11 @@ function ChatInterface({ api, username, deviceId, nodeId, storageState, identity
   }, [send]);
 
   const makePeer = useCallback((peerName) => {
-    const stunUrls = [
-      'stun:10.20.1.1:3478',
-      'stun:10.20.2.1:3478',
-      'stun:10.20.3.1:3478',
-    ];
-    if (window.location.hostname && !stunUrls.some(u => u.includes(window.location.hostname))) {
-      stunUrls.push(`stun:${window.location.hostname}:3478`);
-    }
+    const stunHost = window.location.hostname || '10.20.1.1';
     const pc = new RTCPeerConnection({
-      iceServers: [{ urls: stunUrls }],
-      iceCandidatePoolSize: 4
+      iceServers: [{ urls: `stun:${stunHost}:3478` }],
+      bundlePolicy: 'max-bundle',
+      rtcpMuxPolicy: 'require'
     });
     peerRef.current = pc;
     activePeerName.current = peerName;
@@ -203,8 +197,8 @@ function ChatInterface({ api, username, deviceId, nodeId, storageState, identity
         const candidate = JSON.stringify(event.candidate);
         if (!localCandidatesReady.current) {
           if (localCandidateQueue.current.length < 64) localCandidateQueue.current.push(candidate);
-        } else if (!send({ type: 'ice_candidate', to: peerName, call_id: activeCallID.current, candidate })) {
-          failCall('Call ended because signaling disconnected.');
+        } else {
+          send({ type: 'ice_candidate', to: peerName, call_id: activeCallID.current, candidate });
         }
       }
     };
@@ -424,7 +418,8 @@ function ChatInterface({ api, username, deviceId, nodeId, storageState, identity
     noiseSuppression: { ideal: true },
     autoGainControl: { ideal: true },
     channelCount: { ideal: 1 },
-    sampleRate: { ideal: 48000 }
+    sampleRate: { ideal: 48000 },
+    latency: { ideal: 0.01 }
   };
 
   const startCall = async () => {
@@ -533,7 +528,7 @@ function ChatInterface({ api, username, deviceId, nodeId, storageState, identity
           <button className="btn-reject" onClick={endCall}>{callIsActive ? 'End call' : 'Dismiss'}</button>
         </div>
       )}
-      <audio ref={audioRef} autoPlay playsInline controls={Boolean(remoteStream)} />
+      <audio ref={audioRef} autoPlay playsInline style={{ display: 'none' }} />
     </div>
   );
 }

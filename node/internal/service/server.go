@@ -116,6 +116,10 @@ func WithPeerTLSConfig(config *tls.Config) Option {
 		}
 		transport := http.DefaultTransport.(*http.Transport).Clone()
 		transport.TLSClientConfig = config.Clone()
+		transport.MaxIdleConns = 100
+		transport.MaxIdleConnsPerHost = 32
+		transport.IdleConnTimeout = 90 * time.Second
+		transport.DisableKeepAlives = false
 		s.httpClient = &http.Client{Timeout: 3 * time.Second, Transport: transport}
 	}
 }
@@ -620,7 +624,6 @@ func (s *Server) handleChatMessage(sender *Client, msg *WSMessage) {
 	s.messageSet[message.ID] = true
 	s.messages = append(s.messages, message)
 	recipient, isLocal := s.clients[msg.To]
-	_, isHomeUser := s.deviceIDs[msg.To]
 	s.mu.Unlock()
 
 	// Confirm to sender
@@ -629,10 +632,8 @@ func (s *Server) handleChatMessage(sender *Client, msg *WSMessage) {
 	// Deliver locally if recipient is on this node
 	if isLocal {
 		recipient.sendJSON(WSMessage{Type: "new_message", Message: &message})
-	}
-
-	// Always forward to peers (the recipient might be on another node)
-	if !isHomeUser {
+	} else {
+		// Forward to peers immediately without delay!
 		go s.forwardMessageToPeers(&message)
 	}
 }

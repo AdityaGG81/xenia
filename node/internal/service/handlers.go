@@ -270,7 +270,6 @@ func (s *Server) handleInternalMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	recipient, isLocal := s.clients[msg.To]
-	_, isHomeUser := s.deviceIDs[msg.To]
 	if msg.OriginNode == "" {
 		if separator := strings.LastIndex(msg.ID, "-"); separator > 0 {
 			msg.OriginNode = msg.ID[:separator]
@@ -307,7 +306,7 @@ func (s *Server) handleInternalMessage(w http.ResponseWriter, r *http.Request) {
 	if senderLocal {
 		sender.sendJSON(WSMessage{Type: "new_message", Message: &msg})
 	}
-	if !isHomeUser && msg.Hops < maxMeshHops {
+	if !isLocal && msg.Hops < maxMeshHops {
 		go s.forwardMessageToPeers(&msg)
 	}
 

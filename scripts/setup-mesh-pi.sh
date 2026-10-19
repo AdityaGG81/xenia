@@ -300,14 +300,21 @@ case "${1:-start}" in
       UNDERLAY_IFACE="$MESH_IFACE"
     fi
 
+    # Ensure multicast packets for VXLAN reach the wireless underlay interface even if eth0 is plugged in
+    ip route replace 239.255.42.42 dev "$UNDERLAY_IFACE" scope link 2>/dev/null || true
+
     # Overlay VXLAN on the backhaul interface for BATMAN-adv
     ip link del vx0 2>/dev/null || true
     ip link add vx0 type vxlan id 42 group 239.255.42.42 dev "$UNDERLAY_IFACE" dstport 4789
     ip link set vx0 up
     batctl meshif bat0 interface add vx0 2>/dev/null || true
 
+    # Optimize Wi-Fi and interface performance: disable power saving on AP
+    iw dev "$AP_IFACE" set power_save off 2>/dev/null || true
+
     # Assign deterministic MAC and unified mesh IP to bat0
     ip link set bat0 address "02:00:00:00:00:$(printf '%02x' "$NODE_ID")" 2>/dev/null || true
+    ip link set bat0 mtu 1400 2>/dev/null || true
     ip addr flush dev bat0 2>/dev/null || true
     ip addr add "10.20.0.${NODE_ID}/16" dev bat0
     ip link set bat0 up
@@ -319,6 +326,10 @@ case "${1:-start}" in
         ip route replace "10.20.${nid}.0/24" via "10.20.0.${nid}" dev bat0 2>/dev/null || true
       fi
     done
+
+    # Clamp TCP MSS to prevent fragmentation over VXLAN/BATMAN
+    iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
+      iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 
     # Disable reverse path filtering everywhere and enable IP forwarding & proxy ARP
     for f in /proc/sys/net/ipv4/conf/*/rp_filter; do echo 0 > "$f" 2>/dev/null || true; done
@@ -438,6 +449,10 @@ systemctl daemon-reload
 if [[ "$SINGLE_RADIO" == false && ("$BACKHAUL_MODE" == "ibss" || NODE_ID -gt 1) ]]; then
   systemctl restart "wpa_supplicant@${MESH_IFACE}.service"
   systemctl enable "wpa_supplicant@${MESH_IFACE}.service"
+else
+  systemctl stop "wpa_supplicant@${MESH_IFACE}.service" 2>/dev/null || true
+  systemctl disable "wpa_supplicant@${MESH_IFACE}.service" 2>/dev/null || true
+  ip link set "$MESH_IFACE" down 2>/dev/null || true
 fi
 systemctl enable xenia-mesh-net.service hostapd.service dnsmasq.service xenia-node.service
 systemctl restart xenia-mesh-net.service
