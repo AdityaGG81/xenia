@@ -57,12 +57,12 @@ else
   AP_PHY=$(basename "$(readlink -f "/sys/class/net/$AP_IFACE/phy80211")")
   [[ "$MESH_PHY" != "$AP_PHY" ]] || { echo "Use separate mesh and AP radios." >&2; exit 1; }
 
-  # Check backhaul capability: IBSS (BATMAN-adv) vs Managed Client Uplink
+  # Check backhaul capability: Native IBSS vs BATMAN-adv over VXLAN
   BACKHAUL_MODE="ibss"
   if ! iw phy "$MESH_PHY" info | grep -Eq '^\s+\* IBSS$'; then
-    BACKHAUL_MODE="client"
-    echo "Notice: $MESH_IFACE ($MESH_PHY) does not support IBSS mode."
-    echo "Configuring Managed Wi-Fi Uplink mode for node ${NODE_ID}."
+    BACKHAUL_MODE="batman-vxlan"
+    echo "Notice: $MESH_IFACE ($MESH_PHY) does not support native IBSS mode."
+    echo "Configuring BATMAN-adv over VXLAN Layer-2 overlay for node ${NODE_ID}."
   fi
 fi
 
@@ -76,6 +76,9 @@ if [[ "$BACKHAUL_MODE" == "ibss" ]]; then
   }
   has_channel "$MESH_PHY" "$MESH_FREQ" "$MESH_CHANNEL" || { echo "Mesh radio cannot use channel $MESH_CHANNEL." >&2; exit 1; }
   modprobe -n batman_adv >/dev/null 2>&1 || { echo "Kernel module batman_adv is unavailable." >&2; exit 1; }
+else
+  modprobe -n batman_adv >/dev/null 2>&1 || { echo "Kernel module batman_adv is unavailable." >&2; exit 1; }
+  modprobe -n vxlan >/dev/null 2>&1 || { echo "Kernel module vxlan is unavailable." >&2; exit 1; }
 fi
 
 if [[ -z "${XENIA_AP_PASSWORD:-}" ]] || (( ${#XENIA_AP_PASSWORD} < 8 || ${#XENIA_AP_PASSWORD} > 63 )) || [[ ! "$XENIA_AP_PASSWORD" =~ ^[A-Za-z0-9_-]+$ ]]; then
@@ -170,18 +173,26 @@ network={
 }
 EOF
 else
-  # In Managed mode, child nodes connect to Node 1's AP
-  if (( NODE_ID > 1 )); then
-    cat > "/etc/wpa_supplicant/wpa_supplicant-${MESH_IFACE}.conf" <<EOF
+  # Auto-association mesh profile: Connects to any reachable Xenia node AP
+  cat > "/etc/wpa_supplicant/wpa_supplicant-${MESH_IFACE}.conf" <<EOF
 ctrl_interface=DIR=/run/wpa_supplicant GROUP=netdev
 country=IN
+update_config=1
+EOF
+  p=10
+  for nid in 1 2 3 4; do
+    if (( nid != NODE_ID )); then
+      cat >> "/etc/wpa_supplicant/wpa_supplicant-${MESH_IFACE}.conf" <<EOF
 network={
-    ssid="Xenia-1"
+    ssid="Xenia-${nid}"
     psk="${XENIA_AP_PASSWORD}"
     key_mgmt=WPA-PSK
+    priority=${p}
 }
 EOF
-  fi
+      p=$((p - 1))
+    fi
+  done
 fi
 if [[ -f "/etc/wpa_supplicant/wpa_supplicant-${MESH_IFACE}.conf" ]]; then
   chmod 0600 "/etc/wpa_supplicant/wpa_supplicant-${MESH_IFACE}.conf"
@@ -231,7 +242,7 @@ case "${1:-start}" in
 esac
 EOF
 else
-  # Client backhaul mode with static IP routing
+  # BATMAN-adv over VXLAN Layer-2 Overlay
   cat > /usr/local/sbin/xenia-mesh-net <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -249,31 +260,68 @@ case "${1:-start}" in
     iptables -P FORWARD ACCEPT 2>/dev/null || true
     iptables -t nat -C PREROUTING -p tcp -i "$AP_IFACE" --dport 80 -j REDIRECT --to-ports 8080 2>/dev/null || \
       iptables -t nat -A PREROUTING -p tcp -i "$AP_IFACE" --dport 80 -j REDIRECT --to-ports 8080 2>/dev/null || true
+
+    # Bring up AP interface for local phones
     ip link set "$AP_IFACE" up
     ip addr flush dev "$AP_IFACE"
     ip addr add "${NODE_IP}/24" dev "$AP_IFACE"
     ip route replace 255.255.255.255 dev "$AP_IFACE" 2>/dev/null || true
 
-    if (( NODE_ID > 1 )); then
+    modprobe batman_adv
+    modprobe vxlan
+
+    # Prepare BATMAN-adv interface
+    ip link show bat0 >/dev/null 2>&1 || ip link add name bat0 type batadv
+    batctl meshif bat0 bridge_loop_avoidance 1 2>/dev/null || true
+
+    # Overlay VXLAN on AP interface (captures peer clients connecting to our AP)
+    ip link del vx_ap 2>/dev/null || true
+    ip link add vx_ap type vxlan id 42 group 239.255.42.42 dev "$AP_IFACE" dstport 4789
+    ip link set vx_ap up
+    batctl meshif bat0 interface add vx_ap 2>/dev/null || true
+
+    # If separate client radio is present, connect to peer AP and overlay VXLAN
+    if [[ -n "$MESH_IFACE" && "$MESH_IFACE" != "$AP_IFACE" && -e "/sys/class/net/$MESH_IFACE" ]]; then
       ip link set "$MESH_IFACE" up
-      # Wait up to 30s for wpa_supplicant to associate with Xenia-1
-      for _ in $(seq 1 30); do
+      # Wait up to 15s for wpa_supplicant association
+      for _ in $(seq 1 15); do
         if wpa_cli -i "$MESH_IFACE" status 2>/dev/null | grep -q '^wpa_state=COMPLETED$'; then
           break
         fi
         sleep 1
       done
-      ip addr flush dev "$MESH_IFACE"
-      ip addr add "10.20.1.${NODE_ID}/24" dev "$MESH_IFACE"
-      ip route replace 10.20.1.0/24 dev "$MESH_IFACE" 2>/dev/null || true
-    else
-      # Node 1 routes for Node 2
-      ip route replace 10.20.2.0/24 via 10.20.1.2 dev "$AP_IFACE" 2>/dev/null || true
+      PEER_SSID=$(wpa_cli -i "$MESH_IFACE" status 2>/dev/null | awk -F= '$1=="ssid"{print $2}')
+      if [[ "$PEER_SSID" =~ ^Xenia-([0-9]+)$ ]]; then
+        PEER_ID="${BASH_REMATCH[1]}"
+        ip addr flush dev "$MESH_IFACE" 2>/dev/null || true
+        ip addr add "10.20.${PEER_ID}.${NODE_ID}/24" dev "$MESH_IFACE"
+      fi
+
+      ip link del vx_sta 2>/dev/null || true
+      ip link add vx_sta type vxlan id 42 group 239.255.42.42 dev "$MESH_IFACE" dstport 4789
+      ip link set vx_sta up
+      batctl meshif bat0 interface add vx_sta 2>/dev/null || true
     fi
+
+    # Assign unified mesh IP to bat0
+    ip addr flush dev bat0 2>/dev/null || true
+    ip addr add "10.20.0.${NODE_ID}/16" dev bat0
+    ip link set bat0 up
+    ip route replace 10.20.0.0/16 dev bat0 2>/dev/null || true
+
+    # Enable proxy ARP on bat0 and AP interface so routed packets traverse BATMAN seamlessly
+    sysctl -w net.ipv4.conf.bat0.proxy_arp=1 >/dev/null 2>&1 || true
+    sysctl -w net.ipv4.conf."$AP_IFACE".proxy_arp=1 >/dev/null 2>&1 || true
     ;;
   stop)
+    ip link set bat0 down 2>/dev/null || true
+    ip link del vx_sta 2>/dev/null || true
+    ip link del vx_ap 2>/dev/null || true
+    ip link del bat0 type batadv 2>/dev/null || true
     ip addr flush dev "$AP_IFACE" 2>/dev/null || true
-    ip addr flush dev "$MESH_IFACE" 2>/dev/null || true
+    if [[ -n "$MESH_IFACE" && "$MESH_IFACE" != "$AP_IFACE" ]]; then
+      ip addr flush dev "$MESH_IFACE" 2>/dev/null || true
+    fi
     ;;
   *) echo "Usage: $0 [start|stop]" >&2; exit 2 ;;
 esac
@@ -289,8 +337,8 @@ chmod 0755 /usr/local/sbin/xenia-mesh-net
 cat > /etc/systemd/system/xenia-mesh-net.service <<EOF
 [Unit]
 Description=Xenia mesh network setup
-$( [[ "$BACKHAUL_MODE" == "ibss" || NODE_ID -gt 1 ]] && echo "Requires=wpa_supplicant@${MESH_IFACE}.service" || true )
-$( [[ "$BACKHAUL_MODE" == "ibss" || NODE_ID -gt 1 ]] && echo "After=wpa_supplicant@${MESH_IFACE}.service" || true )
+$( [[ "$SINGLE_RADIO" == false && "$MESH_IFACE" != "$AP_IFACE" ]] && echo "Requires=wpa_supplicant@${MESH_IFACE}.service" || true )
+$( [[ "$SINGLE_RADIO" == false && "$MESH_IFACE" != "$AP_IFACE" ]] && echo "After=wpa_supplicant@${MESH_IFACE}.service" || true )
 Before=hostapd.service dnsmasq.service xenia-node.service
 
 [Service]
@@ -320,8 +368,8 @@ Requires=xenia-mesh-net.service
 After=xenia-mesh-net.service
 EOF
 
-if [[ -f /etc/dhcpcd.conf ]] && ! grep -q '^denyinterfaces .*\bbr0\b' /etc/dhcpcd.conf; then
-  printf '\n# Xenia mesh interfaces\ndenyinterfaces %s %s br0 bat0\n' "$MESH_IFACE" "$AP_IFACE" >> /etc/dhcpcd.conf
+if [[ -f /etc/dhcpcd.conf ]] && ! grep -q '^denyinterfaces .*\bbat0\b' /etc/dhcpcd.conf; then
+  printf '\n# Xenia mesh interfaces\ndenyinterfaces %s %s br0 bat0 vx_sta vx_ap\n' "$MESH_IFACE" "$AP_IFACE" >> /etc/dhcpcd.conf
 fi
 install -d -m 0750 -o "$SUDO_USER" -g "$NODE_GROUP" "/var/lib/xenia-node/node${NODE_ID}"
 
@@ -335,7 +383,7 @@ if [[ -f /etc/xenia-node/tls.crt && -f /etc/xenia-node/tls.key ]]; then
   NODE_TLS_ARGS="--tls-cert /etc/xenia-node/tls.crt --tls-key /etc/xenia-node/tls.key --peer-ca /etc/xenia-node/ca.crt"
 fi
 
-DISCOVERY_IFACE_ARG=""
+DISCOVERY_IFACE_ARG="--discovery-iface bat0"
 if [[ "$BACKHAUL_MODE" == "ibss" ]]; then
   DISCOVERY_IFACE_ARG="--discovery-iface br0"
 fi

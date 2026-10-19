@@ -29,7 +29,7 @@ for node_id in 1 2 3 4; do
 basicConstraints=critical,CA:FALSE
 keyUsage=critical,digitalSignature,keyEncipherment
 extendedKeyUsage=serverAuth
-subjectAltName=IP:${node_ip},IP:10.20.1.1,IP:10.20.2.1,IP:10.20.3.1,DNS:xenia.mesh,DNS:*.xenia.mesh,DNS:xenia.local,DNS:*.xenia.local
+subjectAltName=IP:${node_ip},IP:10.20.0.${node_id},IP:10.20.0.1,IP:10.20.0.2,IP:10.20.0.3,IP:10.20.0.4,IP:10.20.1.1,IP:10.20.2.1,IP:10.20.3.1,DNS:xenia.mesh,DNS:*.xenia.mesh,DNS:xenia.local,DNS:*.xenia.local
 EOF
   openssl x509 -req -in "$request" -CA "$OUT_DIR/ca.crt" \
     -CAkey "$OUT_DIR/ca.key" -CAcreateserial -out "$OUT_DIR/node${node_id}.crt" \
