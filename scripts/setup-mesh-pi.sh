@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Configure BATMAN-adv on a dedicated backhaul radio and a separate phone AP.
+# Configure Xenia mesh backhaul (BATMAN-adv IBSS or Managed Wi-Fi Uplink) and phone AP.
 set -euo pipefail
 export PATH="/usr/sbin:/usr/local/sbin:$PATH"
 
@@ -19,6 +19,7 @@ MESH_IFACE=${XENIA_MESH_IFACE:-wlan1}
 AP_IFACE=${XENIA_AP_IFACE:-wlan0}
 MESH_ID=${XENIA_MESH_ID:-XeniaMesh}
 MESH_CHANNEL=${XENIA_MESH_CHANNEL:-1}
+
 for iface in "$MESH_IFACE" "$AP_IFACE"; do
   if [[ ! "$iface" =~ ^[A-Za-z0-9_.-]{1,15}$ ]]; then
     echo "Wireless interface names must be 1–15 letters, digits, dots, underscores, or dashes." >&2
@@ -35,10 +36,11 @@ fi
 MESH_FREQ=$((2407 + MESH_CHANNEL * 5))
 AP_CHANNEL=6
 if (( MESH_CHANNEL == 6 )); then AP_CHANNEL=11; fi
+if (( NODE_ID == 1 )); then AP_CHANNEL=1; fi
 NODE_IP="10.20.${NODE_ID}.1"
 
 if [[ ! -x "$NODE_BIN" ]]; then echo "Expected executable Pi binary: $NODE_BIN" >&2; exit 1; fi
-for command in iw ip modprobe batctl hostapd dnsmasq wpa_supplicant wpa_cli systemctl; do
+for command in iw ip hostapd dnsmasq wpa_supplicant wpa_cli systemctl sysctl; do
   command -v "$command" >/dev/null || { echo "Missing command: $command" >&2; exit 1; }
 done
 for iface in "$MESH_IFACE" "$AP_IFACE"; do
@@ -47,16 +49,25 @@ done
 MESH_PHY=$(basename "$(readlink -f "/sys/class/net/$MESH_IFACE/phy80211")")
 AP_PHY=$(basename "$(readlink -f "/sys/class/net/$AP_IFACE/phy80211")")
 [[ "$MESH_PHY" != "$AP_PHY" ]] || { echo "Use separate mesh and AP radios." >&2; exit 1; }
-iw phy "$MESH_PHY" info | grep -Eq '^\s+\* IBSS$' || { echo "$MESH_IFACE lacks IBSS mode." >&2; exit 1; }
+
+# Check backhaul capability: IBSS (BATMAN-adv) vs Managed Client Uplink
+BACKHAUL_MODE="ibss"
+if ! iw phy "$MESH_PHY" info | grep -Eq '^\s+\* IBSS$'; then
+  BACKHAUL_MODE="client"
+  echo "Notice: $MESH_IFACE ($MESH_PHY) does not support IBSS mode."
+  echo "Configuring Managed Wi-Fi Uplink mode for node ${NODE_ID}."
+fi
+
 iw phy "$AP_PHY" info | grep -Eq '^\s+\* AP$' || { echo "$AP_IFACE lacks AP mode." >&2; exit 1; }
-has_channel() {
-  iw phy "$1" info | awk -v freq="$2" -v channel="[$3]" \
-    '$1 == "*" && $2 == freq && $4 == channel && $0 !~ /disabled/ { found=1 } END { exit !found }'
-}
-has_channel "$MESH_PHY" "$MESH_FREQ" "$MESH_CHANNEL" || { echo "Mesh radio cannot use channel $MESH_CHANNEL." >&2; exit 1; }
-AP_FREQ=$((2407 + AP_CHANNEL * 5))
-has_channel "$AP_PHY" "$AP_FREQ" "$AP_CHANNEL" || { echo "AP radio cannot use channel $AP_CHANNEL." >&2; exit 1; }
-modprobe -n batman_adv >/dev/null 2>&1 || { echo "Kernel module batman_adv is unavailable." >&2; exit 1; }
+
+if [[ "$BACKHAUL_MODE" == "ibss" ]]; then
+  has_channel() {
+    iw phy "$1" info | awk -v freq="$2" -v channel="[$3]" \
+      '$1 == "*" && $2 == freq && $4 == channel && $0 !~ /disabled/ { found=1 } END { exit !found }'
+  }
+  has_channel "$MESH_PHY" "$MESH_FREQ" "$MESH_CHANNEL" || { echo "Mesh radio cannot use channel $MESH_CHANNEL." >&2; exit 1; }
+  modprobe -n batman_adv >/dev/null 2>&1 || { echo "Kernel module batman_adv is unavailable." >&2; exit 1; }
+fi
 
 if [[ -z "${XENIA_AP_PASSWORD:-}" ]] || (( ${#XENIA_AP_PASSWORD} < 8 || ${#XENIA_AP_PASSWORD} > 63 )) || [[ ! "$XENIA_AP_PASSWORD" =~ ^[A-Za-z0-9_-]+$ ]]; then
   echo "Missing valid XENIA_AP_PASSWORD. Run install-xenia-pi.sh to provision generated credentials." >&2; exit 2
@@ -85,7 +96,55 @@ printf 'XENIA_MESH_TOKEN=%s\n' "$XENIA_MESH_TOKEN" >> "$NODE_ENV_TMP"
 chmod 0600 "$NODE_ENV_TMP"
 mv "$NODE_ENV_TMP" /etc/xenia-node/node.env
 
-cat > "/etc/wpa_supplicant/wpa_supplicant-${MESH_IFACE}.conf" <<EOF
+# ──────────────────────────────────────────────
+#  Hostapd & Dnsmasq Configuration
+# ──────────────────────────────────────────────
+AP_BIND_IFACE="${AP_IFACE}"
+BRIDGE_LINE=""
+if [[ "$BACKHAUL_MODE" == "ibss" ]]; then
+  AP_BIND_IFACE="br0"
+  BRIDGE_LINE="bridge=br0"
+fi
+
+cat > /etc/hostapd/hostapd.conf <<EOF
+interface=${AP_IFACE}
+${BRIDGE_LINE}
+driver=nl80211
+ssid=Xenia-${NODE_ID}
+hw_mode=g
+channel=${AP_CHANNEL}
+macaddr_acl=0
+auth_algs=1
+ignore_broadcast_ssid=0
+wpa=2
+wpa_passphrase=${XENIA_AP_PASSWORD}
+wpa_key_mgmt=WPA-PSK
+wpa_pairwise=TKIP CCMP
+rsn_pairwise=CCMP
+country_code=IN
+ieee80211d=1
+EOF
+chmod 0600 /etc/hostapd/hostapd.conf
+
+sed -i 's|#DAEMON_CONF=""|DAEMON_CONF="/etc/hostapd/hostapd.conf"|g' /etc/default/hostapd 2>/dev/null || true
+sed -i 's|DAEMON_CONF=.*|DAEMON_CONF="/etc/hostapd/hostapd.conf"|g' /etc/default/hostapd 2>/dev/null || true
+rm -f /etc/systemd/system/hostapd.service.d/override.conf 2>/dev/null || true
+rfkill unblock wlan 2>/dev/null || true
+
+cat > /etc/dnsmasq.conf <<EOF
+interface=${AP_BIND_IFACE}
+bind-interfaces
+dhcp-range=10.20.${NODE_ID}.100,10.20.${NODE_ID}.250,255.255.0.0,12h
+dhcp-option=option:router,${NODE_IP}
+dhcp-leasefile=/var/lib/dnsmasq/xenia-${NODE_ID}.leases
+EOF
+install -d -m 0755 /var/lib/dnsmasq
+
+# ──────────────────────────────────────────────
+#  Wpa_supplicant for Backhaul
+# ──────────────────────────────────────────────
+if [[ "$BACKHAUL_MODE" == "ibss" ]]; then
+  cat > "/etc/wpa_supplicant/wpa_supplicant-${MESH_IFACE}.conf" <<EOF
 ctrl_interface=DIR=/run/wpa_supplicant GROUP=netdev
 country=IN
 network={
@@ -95,35 +154,29 @@ network={
     key_mgmt=NONE
 }
 EOF
-chmod 0600 "/etc/wpa_supplicant/wpa_supplicant-${MESH_IFACE}.conf"
-
-if (( MESH_CHANNEL == 11 )); then AP_CHANNEL=6; fi
-cat > /etc/hostapd/hostapd.conf <<EOF
-interface=${AP_IFACE}
-bridge=br0
-driver=nl80211
-ssid=Xenia-${NODE_ID}
-hw_mode=g
-channel=${AP_CHANNEL}
-country_code=IN
-ieee80211d=1
-auth_algs=1
-wpa=2
-wpa_key_mgmt=WPA-PSK
-rsn_pairwise=CCMP
-wpa_passphrase=${XENIA_AP_PASSWORD}
+else
+  # In Managed mode, child nodes connect to Node 1's AP
+  if (( NODE_ID > 1 )); then
+    cat > "/etc/wpa_supplicant/wpa_supplicant-${MESH_IFACE}.conf" <<EOF
+ctrl_interface=DIR=/run/wpa_supplicant GROUP=netdev
+country=IN
+network={
+    ssid="Xenia-1"
+    psk="${XENIA_AP_PASSWORD}"
+    key_mgmt=WPA-PSK
+}
 EOF
-chmod 0600 /etc/hostapd/hostapd.conf
-cat > /etc/dnsmasq.conf <<EOF
-interface=br0
-bind-interfaces
-dhcp-range=10.20.${NODE_ID}.100,10.20.${NODE_ID}.250,255.255.0.0,12h
-dhcp-option=option:router,${NODE_IP}
-dhcp-leasefile=/var/lib/dnsmasq/xenia-${NODE_ID}.leases
-EOF
-install -d -m 0755 /var/lib/dnsmasq
+  fi
+fi
+if [[ -f "/etc/wpa_supplicant/wpa_supplicant-${MESH_IFACE}.conf" ]]; then
+  chmod 0600 "/etc/wpa_supplicant/wpa_supplicant-${MESH_IFACE}.conf"
+fi
 
-cat > /usr/local/sbin/xenia-mesh-net <<'EOF'
+# ──────────────────────────────────────────────
+#  Mesh Network Startup Script
+# ──────────────────────────────────────────────
+if [[ "$BACKHAUL_MODE" == "ibss" ]]; then
+  cat > /usr/local/sbin/xenia-mesh-net <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 NODE_IP="@NODE_IP@"
@@ -162,14 +215,61 @@ case "${1:-start}" in
   *) echo "Usage: $0 [start|stop]" >&2; exit 2 ;;
 esac
 EOF
-sed -i -e "s|@NODE_IP@|${NODE_IP}|g" -e "s|@MESH_IFACE@|${MESH_IFACE}|g" /usr/local/sbin/xenia-mesh-net
+else
+  # Client backhaul mode with static IP routing
+  cat > /usr/local/sbin/xenia-mesh-net <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+NODE_ID="@NODE_ID@"
+NODE_IP="@NODE_IP@"
+MESH_IFACE="@MESH_IFACE@"
+AP_IFACE="@AP_IFACE@"
+case "${1:-start}" in
+  start)
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null
+    iptables -P FORWARD ACCEPT 2>/dev/null || true
+    ip link set "$AP_IFACE" up
+    ip addr flush dev "$AP_IFACE"
+    ip addr add "${NODE_IP}/24" dev "$AP_IFACE"
+    ip route replace 255.255.255.255 dev "$AP_IFACE" 2>/dev/null || true
+
+    if (( NODE_ID > 1 )); then
+      ip link set "$MESH_IFACE" up
+      # Wait up to 30s for wpa_supplicant to associate with Xenia-1
+      for _ in $(seq 1 30); do
+        if wpa_cli -i "$MESH_IFACE" status 2>/dev/null | grep -q '^wpa_state=COMPLETED$'; then
+          break
+        fi
+        sleep 1
+      done
+      ip addr flush dev "$MESH_IFACE"
+      ip addr add "10.20.1.${NODE_ID}/24" dev "$MESH_IFACE"
+      ip route replace 10.20.1.0/24 dev "$MESH_IFACE" 2>/dev/null || true
+    else
+      # Node 1 routes for Node 2
+      ip route replace 10.20.2.0/24 via 10.20.1.2 dev "$AP_IFACE" 2>/dev/null || true
+    fi
+    ;;
+  stop)
+    ip addr flush dev "$AP_IFACE" 2>/dev/null || true
+    ip addr flush dev "$MESH_IFACE" 2>/dev/null || true
+    ;;
+  *) echo "Usage: $0 [start|stop]" >&2; exit 2 ;;
+esac
+EOF
+fi
+
+sed -i -e "s|@NODE_ID@|${NODE_ID}|g" -e "s|@NODE_IP@|${NODE_IP}|g" -e "s|@MESH_IFACE@|${MESH_IFACE}|g" -e "s|@AP_IFACE@|${AP_IFACE}|g" /usr/local/sbin/xenia-mesh-net
 chmod 0755 /usr/local/sbin/xenia-mesh-net
 
+# ──────────────────────────────────────────────
+#  Systemd Services
+# ──────────────────────────────────────────────
 cat > /etc/systemd/system/xenia-mesh-net.service <<EOF
 [Unit]
-Description=Xenia BATMAN-adv mesh bridge
-Requires=wpa_supplicant@${MESH_IFACE}.service
-After=wpa_supplicant@${MESH_IFACE}.service
+Description=Xenia mesh network setup
+$( [[ "$BACKHAUL_MODE" == "ibss" || NODE_ID -gt 1 ]] && echo "Requires=wpa_supplicant@${MESH_IFACE}.service" || true )
+$( [[ "$BACKHAUL_MODE" == "ibss" || NODE_ID -gt 1 ]] && echo "After=wpa_supplicant@${MESH_IFACE}.service" || true )
 Before=hostapd.service dnsmasq.service xenia-node.service
 
 [Service]
@@ -213,6 +313,12 @@ if [[ -f /etc/xenia-node/tls.crt && -f /etc/xenia-node/tls.key ]]; then
   NODE_API_SCHEME="https"
   NODE_TLS_ARGS="--tls-cert /etc/xenia-node/tls.crt --tls-key /etc/xenia-node/tls.key --peer-ca /etc/xenia-node/ca.crt"
 fi
+
+DISCOVERY_IFACE_ARG=""
+if [[ "$BACKHAUL_MODE" == "ibss" ]]; then
+  DISCOVERY_IFACE_ARG="--discovery-iface br0"
+fi
+
 cat > /etc/systemd/system/xenia-node.service <<EOF
 [Unit]
 Description=Xenia offline communication node
@@ -224,7 +330,7 @@ Type=simple
 User=${SUDO_USER}
 Group=${NODE_GROUP}
 EnvironmentFile=-/etc/xenia-node/node.env
-ExecStart=${NODE_BIN} --listen 0.0.0.0:8080 --node-id node${NODE_ID} --storage-dir /var/lib/xenia-node/node${NODE_ID} --advertise-url ${NODE_API_SCHEME}://${NODE_IP}:8080 --discovery-iface br0 ${NODE_TLS_ARGS}
+ExecStart=${NODE_BIN} --listen 0.0.0.0:8080 --node-id node${NODE_ID} --storage-dir /var/lib/xenia-node/node${NODE_ID} --advertise-url ${NODE_API_SCHEME}://${NODE_IP}:8080 ${DISCOVERY_IFACE_ARG} ${NODE_TLS_ARGS}
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
@@ -236,19 +342,28 @@ ReadWritePaths=/var/lib/xenia-node/node${NODE_ID}
 WantedBy=multi-user.target
 EOF
 
-systemctl disable --now NetworkManager 2>/dev/null || true
+# NetworkManager remains active for eth0 (CI/CD SSH), but ignores wlan0 and wlan1
+mkdir -p /etc/NetworkManager/conf.d
+printf "[keyfile]\nunmanaged-devices=interface-name:wlan0;interface-name:wlan1\n" > /etc/NetworkManager/conf.d/99-xenia.conf
+nmcli general reload 2>/dev/null || true
+
+systemctl stop wpa_supplicant 2>/dev/null || true
 systemctl disable --now hostapd dnsmasq "wpa_supplicant@${AP_IFACE}.service" 2>/dev/null || true
-systemctl unmask hostapd "wpa_supplicant@${MESH_IFACE}.service"
+systemctl unmask hostapd "wpa_supplicant@${MESH_IFACE}.service" 2>/dev/null || true
+rfkill unblock wlan 2>/dev/null || true
+pkill -9 hostapd 2>/dev/null || true
 systemctl daemon-reload
-systemctl restart "wpa_supplicant@${MESH_IFACE}.service"
-systemctl enable "wpa_supplicant@${MESH_IFACE}.service" xenia-mesh-net.service hostapd.service dnsmasq.service xenia-node.service
-if ! systemctl restart xenia-mesh-net.service; then
-  systemctl --no-pager --full status "wpa_supplicant@${MESH_IFACE}.service" || true
-  echo "Mesh radio did not join IBSS. Check adapter support, channel, passphrase, and country." >&2
-  exit 1
+
+if [[ "$BACKHAUL_MODE" == "ibss" || NODE_ID -gt 1 ]]; then
+  systemctl restart "wpa_supplicant@${MESH_IFACE}.service"
+  systemctl enable "wpa_supplicant@${MESH_IFACE}.service"
 fi
+systemctl enable xenia-mesh-net.service hostapd.service dnsmasq.service xenia-node.service
+systemctl restart xenia-mesh-net.service
 systemctl restart hostapd.service dnsmasq.service xenia-node.service
 
-echo "Node ${NODE_ID} is configured on BATMAN-adv at ${NODE_IP}."
-echo "Connect phones to SSID Xenia-${NODE_ID}; check peers with sudo batctl meshif bat0 neighbors."
-echo "NetworkManager was disabled. Use scripts/restore-network.sh to restore networking."
+echo "=================================================="
+echo "Node ${NODE_ID} is configured (${BACKHAUL_MODE} mode) at ${NODE_IP}."
+echo "Connect phones to SSID Xenia-${NODE_ID}."
+echo "eth0 is connected for CI/CD management. Wireless interfaces wlan0/wlan1 are configured for Xenia mesh."
+echo "=================================================="

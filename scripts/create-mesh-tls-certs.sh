@@ -16,17 +16,12 @@ for file in ca.key ca.crt node1.key node1.crt node2.key node2.crt; do
 done
 
 umask 077
-CA_EXT=$(mktemp)
-trap 'rm -f "$CA_EXT"' EXIT
-cat > "$CA_EXT" <<'EOF'
-basicConstraints=critical,CA:TRUE
-keyUsage=critical,keyCertSign,cRLSign
-subjectKeyIdentifier=hash
-EOF
-
 openssl req -x509 -newkey rsa:3072 -nodes -keyout "$OUT_DIR/ca.key" \
   -out "$OUT_DIR/ca.crt" -days 3650 -sha256 \
-  -subj "/CN=Xenia Mesh Local CA" -extfile "$CA_EXT"
+  -subj "/CN=Xenia Mesh Local CA" \
+  -addext "basicConstraints=critical,CA:TRUE" \
+  -addext "keyUsage=critical,keyCertSign,cRLSign" \
+  -addext "subjectKeyIdentifier=hash"
 
 for node_id in 1 2; do
   node_ip="10.20.${node_id}.1"
