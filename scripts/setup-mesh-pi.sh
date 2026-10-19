@@ -44,11 +44,20 @@ for command in iw ip hostapd dnsmasq wpa_supplicant wpa_cli systemctl sysctl ipt
   command -v "$command" >/dev/null || { echo "Missing command: $command (install with: apt-get install -y $command)" >&2; exit 1; }
 done
 SINGLE_RADIO=false
+IS_RELAY_ONLY=false
 if [[ ! -e "/sys/class/net/$MESH_IFACE/phy80211" ]]; then
   if [[ -e "/sys/class/net/$AP_IFACE/phy80211" ]]; then
     SINGLE_RADIO=true
-    BACKHAUL_MODE="none"
-    echo "Notice: Interface $MESH_IFACE not found. Node ${NODE_ID} will operate as a Single-Radio Mesh AP on $AP_IFACE."
+    if (( NODE_ID == 1 )); then
+      BACKHAUL_MODE="batman-vxlan"
+      echo "Notice: Interface $MESH_IFACE not found. Node 1 operating as root AP on $AP_IFACE."
+    else
+      IS_RELAY_ONLY=true
+      BACKHAUL_MODE="batman-vxlan"
+      MESH_IFACE="$AP_IFACE"
+      AP_IFACE=""
+      echo "Notice: Interface wlan1 not found. Node ${NODE_ID} will operate as a Dedicated Mesh Relay on $MESH_IFACE (no extra antenna required)."
+    fi
   else
     echo "Wireless interface missing: $AP_IFACE" >&2; exit 1
   fi
@@ -66,8 +75,10 @@ else
   fi
 fi
 
-AP_PHY=$(basename "$(readlink -f "/sys/class/net/$AP_IFACE/phy80211")")
-iw phy "$AP_PHY" info | grep -Eq '^\s+\* AP$' || { echo "$AP_IFACE lacks AP mode." >&2; exit 1; }
+if [[ "$IS_RELAY_ONLY" == false ]]; then
+  AP_PHY=$(basename "$(readlink -f "/sys/class/net/$AP_IFACE/phy80211")")
+  iw phy "$AP_PHY" info | grep -Eq '^\s+\* AP$' || { echo "$AP_IFACE lacks AP mode." >&2; exit 1; }
+fi
 
 if [[ "$BACKHAUL_MODE" == "ibss" ]]; then
   has_channel() {
@@ -97,9 +108,11 @@ backup_once() {
   [[ ! -e "$path" || -e "${path}.xenia-original" ]] || cp -a "$path" "${path}.xenia-original"
 }
 backup_once /etc/dhcpcd.conf
-backup_once /etc/dnsmasq.conf
-backup_once /etc/hostapd/hostapd.conf
-if [[ "$SINGLE_RADIO" == false ]]; then
+if [[ "$IS_RELAY_ONLY" == false ]]; then
+  backup_once /etc/dnsmasq.conf
+  backup_once /etc/hostapd/hostapd.conf
+fi
+if [[ "$IS_RELAY_ONLY" == true || "$SINGLE_RADIO" == false ]]; then
   backup_once "/etc/wpa_supplicant/wpa_supplicant-${MESH_IFACE}.conf"
 fi
 
@@ -113,14 +126,15 @@ mv "$NODE_ENV_TMP" /etc/xenia-node/node.env
 # ──────────────────────────────────────────────
 #  Hostapd & Dnsmasq Configuration
 # ──────────────────────────────────────────────
-AP_BIND_IFACE="${AP_IFACE}"
-BRIDGE_LINE=""
-if [[ "$BACKHAUL_MODE" == "ibss" ]]; then
-  AP_BIND_IFACE="br0"
-  BRIDGE_LINE="bridge=br0"
-fi
+if [[ "$IS_RELAY_ONLY" == false ]]; then
+  AP_BIND_IFACE="${AP_IFACE}"
+  BRIDGE_LINE=""
+  if [[ "$BACKHAUL_MODE" == "ibss" ]]; then
+    AP_BIND_IFACE="br0"
+    BRIDGE_LINE="bridge=br0"
+  fi
 
-cat > /etc/hostapd/hostapd.conf <<EOF
+  cat > /etc/hostapd/hostapd.conf <<EOF
 interface=${AP_IFACE}
 ${BRIDGE_LINE}
 driver=nl80211
@@ -138,14 +152,14 @@ rsn_pairwise=CCMP
 country_code=IN
 ieee80211d=1
 EOF
-chmod 0600 /etc/hostapd/hostapd.conf
+  chmod 0600 /etc/hostapd/hostapd.conf
 
-sed -i 's|#DAEMON_CONF=""|DAEMON_CONF="/etc/hostapd/hostapd.conf"|g' /etc/default/hostapd 2>/dev/null || true
-sed -i 's|DAEMON_CONF=.*|DAEMON_CONF="/etc/hostapd/hostapd.conf"|g' /etc/default/hostapd 2>/dev/null || true
-rm -f /etc/systemd/system/hostapd.service.d/override.conf 2>/dev/null || true
-rfkill unblock wlan 2>/dev/null || true
+  sed -i 's|#DAEMON_CONF=""|DAEMON_CONF="/etc/hostapd/hostapd.conf"|g' /etc/default/hostapd 2>/dev/null || true
+  sed -i 's|DAEMON_CONF=.*|DAEMON_CONF="/etc/hostapd/hostapd.conf"|g' /etc/default/hostapd 2>/dev/null || true
+  rm -f /etc/systemd/system/hostapd.service.d/override.conf 2>/dev/null || true
+  rfkill unblock wlan 2>/dev/null || true
 
-cat > /etc/dnsmasq.conf <<EOF
+  cat > /etc/dnsmasq.conf <<EOF
 interface=${AP_BIND_IFACE}
 bind-interfaces
 dhcp-range=10.20.${NODE_ID}.100,10.20.${NODE_ID}.250,255.255.255.0,12h
@@ -156,7 +170,8 @@ address=/xenia.mesh/${NODE_IP}
 address=/xenia.local/${NODE_IP}
 address=/node${NODE_ID}.xenia.mesh/${NODE_IP}
 EOF
-install -d -m 0755 /var/lib/dnsmasq
+  install -d -m 0755 /var/lib/dnsmasq
+fi
 
 # ──────────────────────────────────────────────
 #  Wpa_supplicant for Backhaul
@@ -179,8 +194,8 @@ ctrl_interface=DIR=/run/wpa_supplicant GROUP=netdev
 country=IN
 update_config=1
 EOF
-  p=10
-  for nid in 1 2 3 4; do
+  p=20
+  for nid in $(seq 1 10); do
     if (( nid != NODE_ID )); then
       cat >> "/etc/wpa_supplicant/wpa_supplicant-${MESH_IFACE}.conf" <<EOF
 network={
@@ -257,15 +272,16 @@ case "${1:-start}" in
     sysctl -w net.ipv4.conf.default.send_redirects=0 >/dev/null
     sysctl -w net.ipv4.conf.all.proxy_arp=1 >/dev/null
     sysctl -w net.ipv4.conf.default.proxy_arp=1 >/dev/null
-    iptables -P FORWARD ACCEPT 2>/dev/null || true
-    iptables -t nat -C PREROUTING -p tcp -i "$AP_IFACE" --dport 80 -j REDIRECT --to-ports 8080 2>/dev/null || \
-      iptables -t nat -A PREROUTING -p tcp -i "$AP_IFACE" --dport 80 -j REDIRECT --to-ports 8080 2>/dev/null || true
-
-    # Bring up AP interface for local phones
-    ip link set "$AP_IFACE" up
-    ip addr flush dev "$AP_IFACE"
-    ip addr add "${NODE_IP}/24" dev "$AP_IFACE"
-    ip route replace 255.255.255.255 dev "$AP_IFACE" 2>/dev/null || true
+    # Bring up AP interface for local phones if AP mode is enabled
+    if [[ -n "$AP_IFACE" ]]; then
+      iptables -t nat -C PREROUTING -p tcp -i "$AP_IFACE" --dport 80 -j REDIRECT --to-ports 8080 2>/dev/null || \
+        iptables -t nat -A PREROUTING -p tcp -i "$AP_IFACE" --dport 80 -j REDIRECT --to-ports 8080 2>/dev/null || true
+      ip link set "$AP_IFACE" up
+      ip addr flush dev "$AP_IFACE"
+      ip addr add "${NODE_IP}/24" dev "$AP_IFACE"
+      ip route replace 255.255.255.255 dev "$AP_IFACE" 2>/dev/null || true
+      iw dev "$AP_IFACE" set power_save off 2>/dev/null || true
+    fi
 
     modprobe batman_adv
     modprobe vxlan
@@ -278,9 +294,10 @@ case "${1:-start}" in
       ip addr flush dev "$MESH_IFACE" 2>/dev/null || true
     fi
 
-    UNDERLAY_IFACE="$AP_IFACE"
-    if (( NODE_ID > 1 )) && [[ -n "$MESH_IFACE" && "$MESH_IFACE" != "$AP_IFACE" && -e "/sys/class/net/$MESH_IFACE" ]]; then
+    UNDERLAY_IFACE="${AP_IFACE:-$MESH_IFACE}"
+    if (( NODE_ID > 1 )) && [[ -n "$MESH_IFACE" && -e "/sys/class/net/$MESH_IFACE" ]]; then
       ip link set "$MESH_IFACE" up
+      iw dev "$MESH_IFACE" set power_save off 2>/dev/null || true
       # Wait up to 15s for wpa_supplicant association
       for _ in $(seq 1 15); do
         if wpa_cli -i "$MESH_IFACE" status 2>/dev/null | grep -q '^wpa_state=COMPLETED$'; then
@@ -309,19 +326,17 @@ case "${1:-start}" in
     ip link set vx0 up
     batctl meshif bat0 interface add vx0 2>/dev/null || true
 
-    # Optimize Wi-Fi and interface performance: disable power saving on AP
-    iw dev "$AP_IFACE" set power_save off 2>/dev/null || true
-
     # Assign deterministic MAC and unified mesh IP to bat0
     ip link set bat0 address "02:00:00:00:00:$(printf '%02x' "$NODE_ID")" 2>/dev/null || true
     ip link set bat0 mtu 1400 2>/dev/null || true
     ip addr flush dev bat0 2>/dev/null || true
     ip addr add "10.20.0.${NODE_ID}/16" dev bat0
+    ip addr add "10.20.${NODE_ID}.1/32" dev bat0 2>/dev/null || true
     ip link set bat0 up
     ip route replace 10.20.0.0/16 dev bat0 2>/dev/null || true
 
     # Explicit peer routes across BATMAN (all client subnets traverse bat0)
-    for nid in 1 2 3 4; do
+    for nid in $(seq 1 10); do
       if (( nid != NODE_ID )); then
         ip route replace "10.20.${nid}.0/24" via "10.20.0.${nid}" dev bat0 2>/dev/null || true
       fi
@@ -335,13 +350,20 @@ case "${1:-start}" in
     for f in /proc/sys/net/ipv4/conf/*/rp_filter; do echo 0 > "$f" 2>/dev/null || true; done
     sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
     sysctl -w net.ipv4.conf.bat0.proxy_arp=1 >/dev/null 2>&1 || true
-    sysctl -w net.ipv4.conf."$AP_IFACE".proxy_arp=1 >/dev/null 2>&1 || true
+    if [[ -n "$AP_IFACE" ]]; then
+      sysctl -w net.ipv4.conf."$AP_IFACE".proxy_arp=1 >/dev/null 2>&1 || true
+    fi
+    if [[ -n "$MESH_IFACE" ]]; then
+      sysctl -w net.ipv4.conf."$MESH_IFACE".proxy_arp=1 >/dev/null 2>&1 || true
+    fi
     ;;
   stop)
     ip link set bat0 down 2>/dev/null || true
     ip link del vx0 2>/dev/null || true
     ip link del bat0 type batadv 2>/dev/null || true
-    ip addr flush dev "$AP_IFACE" 2>/dev/null || true
+    if [[ -n "$AP_IFACE" ]]; then
+      ip addr flush dev "$AP_IFACE" 2>/dev/null || true
+    fi
     if [[ -n "$MESH_IFACE" && "$MESH_IFACE" != "$AP_IFACE" ]]; then
       ip addr flush dev "$MESH_IFACE" 2>/dev/null || true
     fi
@@ -360,8 +382,8 @@ chmod 0755 /usr/local/sbin/xenia-mesh-net
 cat > /etc/systemd/system/xenia-mesh-net.service <<EOF
 [Unit]
 Description=Xenia mesh network setup
-$( [[ "$SINGLE_RADIO" == false && "$MESH_IFACE" != "$AP_IFACE" && NODE_ID -gt 1 ]] && echo "Requires=wpa_supplicant@${MESH_IFACE}.service" || true )
-$( [[ "$SINGLE_RADIO" == false && "$MESH_IFACE" != "$AP_IFACE" && NODE_ID -gt 1 ]] && echo "After=wpa_supplicant@${MESH_IFACE}.service" || true )
+$( [[ ( "$IS_RELAY_ONLY" == true || "$SINGLE_RADIO" == false ) && NODE_ID -gt 1 ]] && echo "Requires=wpa_supplicant@${MESH_IFACE}.service" || true )
+$( [[ ( "$IS_RELAY_ONLY" == true || "$SINGLE_RADIO" == false ) && NODE_ID -gt 1 ]] && echo "After=wpa_supplicant@${MESH_IFACE}.service" || true )
 Before=hostapd.service dnsmasq.service xenia-node.service
 
 [Service]
@@ -440,26 +462,47 @@ printf "[keyfile]\nunmanaged-devices=interface-name:wlan0;interface-name:wlan1\n
 nmcli general reload 2>/dev/null || true
 
 systemctl stop wpa_supplicant 2>/dev/null || true
-systemctl disable --now hostapd dnsmasq "wpa_supplicant@${AP_IFACE}.service" 2>/dev/null || true
-systemctl unmask hostapd "wpa_supplicant@${MESH_IFACE}.service" 2>/dev/null || true
+if [[ -n "$AP_IFACE" ]]; then
+  systemctl disable --now "wpa_supplicant@${AP_IFACE}.service" 2>/dev/null || true
+fi
+systemctl unmask hostapd 2>/dev/null || true
+if [[ -n "$MESH_IFACE" ]]; then
+  systemctl unmask "wpa_supplicant@${MESH_IFACE}.service" 2>/dev/null || true
+fi
 rfkill unblock wlan 2>/dev/null || true
 pkill -9 hostapd 2>/dev/null || true
 systemctl daemon-reload
 
-if [[ "$SINGLE_RADIO" == false && ("$BACKHAUL_MODE" == "ibss" || NODE_ID -gt 1) ]]; then
+if [[ "$IS_RELAY_ONLY" == true || ( "$SINGLE_RADIO" == false && NODE_ID -gt 1 ) ]]; then
   systemctl restart "wpa_supplicant@${MESH_IFACE}.service"
   systemctl enable "wpa_supplicant@${MESH_IFACE}.service"
 else
   systemctl stop "wpa_supplicant@${MESH_IFACE}.service" 2>/dev/null || true
   systemctl disable "wpa_supplicant@${MESH_IFACE}.service" 2>/dev/null || true
-  ip link set "$MESH_IFACE" down 2>/dev/null || true
+  if [[ -n "$MESH_IFACE" && "$MESH_IFACE" != "$AP_IFACE" ]]; then
+    ip link set "$MESH_IFACE" down 2>/dev/null || true
+  fi
 fi
-systemctl enable xenia-mesh-net.service hostapd.service dnsmasq.service xenia-node.service
-systemctl restart xenia-mesh-net.service
-systemctl restart hostapd.service dnsmasq.service xenia-node.service
 
-echo "=================================================="
-echo "Node ${NODE_ID} is configured (${BACKHAUL_MODE} mode) at ${NODE_IP}."
-echo "Connect phones to SSID Xenia-${NODE_ID}."
-echo "eth0 is connected for CI/CD management. Wireless interfaces wlan0/wlan1 are configured for Xenia mesh."
-echo "=================================================="
+if [[ "$IS_RELAY_ONLY" == true ]]; then
+  systemctl disable --now hostapd.service dnsmasq.service 2>/dev/null || true
+  systemctl enable xenia-mesh-net.service xenia-node.service
+  systemctl restart xenia-mesh-net.service
+  systemctl restart xenia-node.service
+
+  echo "=================================================="
+  echo "Node ${NODE_ID} is configured as a Dedicated Mesh Relay at ${NODE_IP}."
+  echo "Relay mode: Connected to mesh on ${MESH_IFACE} (single radio, no extra antenna required)."
+  echo "Transferring traffic, WebRTC calls, and messages across the BATMAN mesh."
+  echo "=================================================="
+else
+  systemctl enable xenia-mesh-net.service hostapd.service dnsmasq.service xenia-node.service
+  systemctl restart xenia-mesh-net.service
+  systemctl restart hostapd.service dnsmasq.service xenia-node.service
+
+  echo "=================================================="
+  echo "Node ${NODE_ID} is configured (${BACKHAUL_MODE} mode) at ${NODE_IP}."
+  echo "Connect phones to SSID Xenia-${NODE_ID}."
+  echo "Wireless interfaces configured for Xenia mesh."
+  echo "=================================================="
+fi

@@ -18,7 +18,14 @@ if [[ ! -f "$OUT_DIR/ca.key" || ! -f "$OUT_DIR/ca.crt" ]]; then
     -addext "subjectKeyIdentifier=hash"
 fi
 
-for node_id in 1 2 3 4; do
+TARGET_NODES="${2:-}"
+if [[ -n "$TARGET_NODES" ]]; then
+  NODE_LIST=("$TARGET_NODES")
+else
+  NODE_LIST=(1 2 3 4 5 6 7 8)
+fi
+
+for node_id in "${NODE_LIST[@]}"; do
   node_ip="10.20.${node_id}.1"
   request="$OUT_DIR/node${node_id}.csr"
   extensions="$OUT_DIR/node${node_id}.ext"
@@ -39,5 +46,5 @@ done
 
 chmod 0600 "$OUT_DIR"/*.key
 chmod 0644 "$OUT_DIR"/*.crt
-echo "Created a private local CA and node certificates in $OUT_DIR for nodes 1-4."
+echo "Created a private local CA and node certificates in $OUT_DIR for nodes: ${NODE_LIST[*]}."
 echo "Keep ca.key private. Copy only ca.crt and each Pi's matching node certificate/key to that Pi."
