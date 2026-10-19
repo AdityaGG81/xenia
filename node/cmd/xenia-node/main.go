@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"embed"
 	"flag"
+	"io"
 	"io/fs"
 	"log"
 	"net"
@@ -16,10 +18,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/aditya/xenia/node/internal/service"
+	"github.com/aditya/xenia/node/internal/stun"
 )
 
 //go:embed www/*
@@ -119,10 +123,110 @@ func serve(nodeID, address string, handler http.Handler, certFile, keyFile strin
 		MaxHeaderBytes:    1 << 20,
 	}
 	serveErr := make(chan error, 1)
+
+	var baseListener net.Listener
+	var redirectServer *http.Server
+
+	// Start local STUN server for WebRTC candidate gathering
+	stunConn, err := stun.StartServer(":3478")
+	if err != nil {
+		log.Printf("[%s] warning: failed to start STUN server on :3478: %v", nodeID, err)
+	} else {
+		defer stunConn.Close()
+	}
+
 	go func() {
 		if certFile != "" {
-			log.Printf("Xenia node %q serving HTTPS on %s", nodeID, address)
-			serveErr <- server.ListenAndServeTLS(certFile, keyFile)
+			l, err := net.Listen("tcp", address)
+			if err != nil {
+				serveErr <- err
+				return
+			}
+			baseListener = l
+
+			tlsListener := newChannelListener(l.Addr())
+			httpListener := newChannelListener(l.Addr())
+
+			go func() {
+				for {
+					c, err := l.Accept()
+					if err != nil {
+						tlsListener.Close()
+						httpListener.Close()
+						return
+					}
+					go func(conn net.Conn) {
+						_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+						var buf [1]byte
+						_, err := io.ReadFull(conn, buf[:])
+						_ = conn.SetReadDeadline(time.Time{})
+						if err != nil {
+							conn.Close()
+							return
+						}
+						wrapped := &prefixConn{
+							Conn: conn,
+							r:    io.MultiReader(bytes.NewReader(buf[:]), conn),
+						}
+						if buf[0] == 0x16 {
+							select {
+							case tlsListener.conns <- wrapped:
+							default:
+								conn.Close()
+							}
+						} else {
+							select {
+							case httpListener.conns <- wrapped:
+							default:
+								conn.Close()
+							}
+						}
+					}(c)
+				}
+			}()
+
+			redirectHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				path := r.URL.Path
+				// Captive portal detection bypass:
+				// Android: http://connectivitycheck.gstatic.com/generate_204
+				if path == "/generate_204" || strings.Contains(path, "generate_204") {
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+				// Apple iOS: http://captive.apple.com/hotspot-detect.html
+				if strings.Contains(path, "hotspot-detect") {
+					w.Header().Set("Content-Type", "text/html")
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte("<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>"))
+					return
+				}
+				// Windows NCSI: /ncsi.txt
+				if path == "/ncsi.txt" {
+					w.Header().Set("Content-Type", "text/plain")
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte("Microsoft NCSI"))
+					return
+				}
+
+				host := r.Host
+				if h, _, err := net.SplitHostPort(r.Host); err == nil {
+					host = h
+				}
+				target := "https://" + host + ":8080" + r.RequestURI
+				http.Redirect(w, r, target, http.StatusMovedPermanently)
+			})
+			redirectServer = &http.Server{
+				Handler:           redirectHandler,
+				ReadHeaderTimeout: 5 * time.Second,
+			}
+			go func() {
+				if err := redirectServer.Serve(httpListener); err != nil && err != http.ErrServerClosed && err != net.ErrClosed {
+					log.Printf("[%s] redirect server error: %v", nodeID, err)
+				}
+			}()
+
+			log.Printf("Xenia node %q serving HTTPS (with auto HTTP-to-HTTPS redirect) on %s", nodeID, address)
+			serveErr <- server.ServeTLS(tlsListener, certFile, keyFile)
 			return
 		}
 		serveErr <- server.ListenAndServe()
@@ -136,6 +240,12 @@ func serve(nodeID, address string, handler http.Handler, certFile, keyFile strin
 			return err
 		}
 	case <-stop.Done():
+		if baseListener != nil {
+			_ = baseListener.Close()
+		}
+		if redirectServer != nil {
+			_ = redirectServer.Close()
+		}
 		ctx, shutdown := context.WithTimeout(context.Background(), 10*time.Second)
 		defer shutdown()
 		if err := server.Shutdown(ctx); err != nil {
@@ -144,6 +254,51 @@ func serve(nodeID, address string, handler http.Handler, certFile, keyFile strin
 		}
 	}
 	return nil
+}
+
+type channelListener struct {
+	addr      net.Addr
+	conns     chan net.Conn
+	closed    chan struct{}
+	closeOnce sync.Once
+}
+
+func newChannelListener(addr net.Addr) *channelListener {
+	return &channelListener{
+		addr:   addr,
+		conns:  make(chan net.Conn, 128),
+		closed: make(chan struct{}),
+	}
+}
+
+func (l *channelListener) Accept() (net.Conn, error) {
+	select {
+	case c, ok := <-l.conns:
+		if !ok {
+			return nil, net.ErrClosed
+		}
+		return c, nil
+	case <-l.closed:
+		return nil, net.ErrClosed
+	}
+}
+
+func (l *channelListener) Close() error {
+	l.closeOnce.Do(func() {
+		close(l.closed)
+	})
+	return nil
+}
+
+func (l *channelListener) Addr() net.Addr { return l.addr }
+
+type prefixConn struct {
+	net.Conn
+	r io.Reader
+}
+
+func (c *prefixConn) Read(b []byte) (int, error) {
+	return c.r.Read(b)
 }
 
 func validAdvertiseURL(raw string) bool {

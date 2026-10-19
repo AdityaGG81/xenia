@@ -57,15 +57,15 @@ if [[ -f "$TLS_DIR/ca.key" ]]; then chmod 0600 "$TLS_DIR/ca.key"; fi
 
 copy_to_pi() {
   local target="$1" node_id="$2"
-  scp "$ROOT_DIR/bin/pi/xenia-node" \
-    "$ROOT_DIR/scripts/setup-mesh-pi.sh" \
+  scp "$ROOT_DIR/bin/pi/xenia-node" "$target:~/xenia-node.new"
+  scp "$ROOT_DIR/scripts/setup-mesh-pi.sh" \
     "$ROOT_DIR/scripts/mesh-status.sh" \
     "$ROOT_DIR/scripts/restore-network.sh" \
     "$ROOT_DIR/scripts/install-xenia-pi.sh" \
     "$SECRETS_FILE" \
     "$TLS_DIR/ca.crt" "$TLS_DIR/node${node_id}.crt" "$TLS_DIR/node${node_id}.key" \
     "$target:~/"
-  ssh "$target" 'chmod 0755 ~/xenia-node ~/setup-mesh-pi.sh ~/mesh-status.sh ~/restore-network.sh ~/install-xenia-pi.sh && chmod 0600 ~/node*.key ~/node-secrets.env'
+  ssh "$target" 'mv -f ~/xenia-node.new ~/xenia-node && chmod 0755 ~/xenia-node ~/setup-mesh-pi.sh ~/mesh-status.sh ~/restore-network.sh ~/install-xenia-pi.sh && chmod 0600 ~/node*.key ~/node-secrets.env && (sudo systemctl restart xenia-node.service 2>/dev/null || true)'
 }
 
 echo "Copying node 1 deployment to $PI1..."

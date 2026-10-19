@@ -8,32 +8,28 @@ if ! command -v openssl >/dev/null 2>&1; then
   exit 1
 fi
 mkdir -p "$OUT_DIR"
-for file in ca.key ca.crt node1.key node1.crt node2.key node2.crt; do
-  if [[ -e "$OUT_DIR/$file" ]]; then
-    echo "Refusing to overwrite $OUT_DIR/$file" >&2
-    exit 1
-  fi
-done
-
-umask 077
-openssl req -x509 -newkey rsa:3072 -nodes -keyout "$OUT_DIR/ca.key" \
-  -out "$OUT_DIR/ca.crt" -days 3650 -sha256 \
-  -subj "/CN=Xenia Mesh Local CA" \
-  -addext "basicConstraints=critical,CA:TRUE" \
-  -addext "keyUsage=critical,keyCertSign,cRLSign" \
-  -addext "subjectKeyIdentifier=hash"
+if [[ ! -f "$OUT_DIR/ca.key" || ! -f "$OUT_DIR/ca.crt" ]]; then
+  umask 077
+  openssl req -x509 -newkey rsa:3072 -nodes -keyout "$OUT_DIR/ca.key" \
+    -out "$OUT_DIR/ca.crt" -days 3650 -sha256 \
+    -subj "/CN=Xenia Mesh Local CA" \
+    -addext "basicConstraints=critical,CA:TRUE" \
+    -addext "keyUsage=critical,keyCertSign,cRLSign" \
+    -addext "subjectKeyIdentifier=hash"
+fi
 
 for node_id in 1 2; do
   node_ip="10.20.${node_id}.1"
   request="$OUT_DIR/node${node_id}.csr"
   extensions="$OUT_DIR/node${node_id}.ext"
+  rm -f "$OUT_DIR/node${node_id}.key" "$OUT_DIR/node${node_id}.crt"
   openssl req -newkey rsa:2048 -nodes -keyout "$OUT_DIR/node${node_id}.key" \
-    -out "$request" -subj "/CN=${node_ip}"
+    -out "$request" -subj "/CN=xenia.mesh"
   cat > "$extensions" <<EOF
 basicConstraints=critical,CA:FALSE
 keyUsage=critical,digitalSignature,keyEncipherment
 extendedKeyUsage=serverAuth
-subjectAltName=IP:${node_ip}
+subjectAltName=IP:${node_ip},IP:10.20.1.1,IP:10.20.2.1,DNS:xenia.mesh,DNS:*.xenia.mesh,DNS:xenia.local,DNS:*.xenia.local
 EOF
   openssl x509 -req -in "$request" -CA "$OUT_DIR/ca.crt" \
     -CAkey "$OUT_DIR/ca.key" -CAcreateserial -out "$OUT_DIR/node${node_id}.crt" \

@@ -44,7 +44,7 @@ function App() {
     event.preventDefault();
     const name = username.trim();
     let targetUrl = url.trim();
-    if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) targetUrl = `http://${targetUrl}`;
+    if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) targetUrl = `${window.location.protocol}//${targetUrl}`;
     if (!name || !targetUrl) return;
     if (![...name].length || [...name].length > 32 || !/^[\p{L}\p{N}._-]+$/u.test(name)) {
       setError('Use 1–32 letters, numbers, dots, dashes, or underscores for your name.');
@@ -73,7 +73,7 @@ function App() {
         <h1 className="gradient-text">Xenia Mesh</h1>
         <p className="subtitle">Connect to a nearby node</p>
         <form onSubmit={handleConnect}>
-          <div className="input-group"><label>Node address</label><input className="user-input" value={url} onChange={event => setUrl(event.target.value)} placeholder="http://192.168.4.1:8080" /></div>
+          <div className="input-group"><label>Node address</label><input className="user-input" value={url} onChange={event => setUrl(event.target.value)} placeholder="https://xenia.mesh:8080" /></div>
           <div className="input-group"><label>Your name</label><input className="user-input" value={username} onChange={event => setUsername(event.target.value)} placeholder="e.g. Alice" autoComplete="nickname" /></div>
           {error && <div className="error-message">{error}</div>}
           <button className="connect-btn" disabled={connecting}>{connecting ? 'Connecting…' : 'Connect to mesh'}</button>
@@ -184,8 +184,11 @@ function ChatInterface({ api, username, deviceId, nodeId, storageState, identity
   }, [send]);
 
   const makePeer = useCallback((peerName) => {
-    peerRef.current?.close();
-    const pc = new RTCPeerConnection({ iceServers: [], iceCandidatePoolSize: 4 });
+    const stunHost = window.location.hostname || '10.20.1.1';
+    const pc = new RTCPeerConnection({
+      iceServers: [{ urls: `stun:${stunHost}:3478` }],
+      iceCandidatePoolSize: 4
+    });
     peerRef.current = pc;
     activePeerName.current = peerName;
     pc.onicecandidate = event => {

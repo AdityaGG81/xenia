@@ -19,6 +19,7 @@ case "$TARGET" in
 esac
 
 npm --prefix "$ROOT_DIR/client" run build
+rm -rf "$ROOT_DIR/node/cmd/xenia-node/www"
 mkdir -p "$ROOT_DIR/node/cmd/xenia-node/www" "$(dirname "$OUTPUT")"
 cp -R "$ROOT_DIR/client/dist/." "$ROOT_DIR/node/cmd/xenia-node/www/"
 

@@ -40,8 +40,8 @@ if (( NODE_ID == 1 )); then AP_CHANNEL=1; fi
 NODE_IP="10.20.${NODE_ID}.1"
 
 if [[ ! -x "$NODE_BIN" ]]; then echo "Expected executable Pi binary: $NODE_BIN" >&2; exit 1; fi
-for command in iw ip hostapd dnsmasq wpa_supplicant wpa_cli systemctl sysctl; do
-  command -v "$command" >/dev/null || { echo "Missing command: $command" >&2; exit 1; }
+for command in iw ip hostapd dnsmasq wpa_supplicant wpa_cli systemctl sysctl iptables; do
+  command -v "$command" >/dev/null || { echo "Missing command: $command (install with: apt-get install -y $command)" >&2; exit 1; }
 done
 for iface in "$MESH_IFACE" "$AP_IFACE"; do
   [[ -e "/sys/class/net/$iface/phy80211" ]] || { echo "Wireless interface missing: $iface" >&2; exit 1; }
@@ -134,9 +134,13 @@ rfkill unblock wlan 2>/dev/null || true
 cat > /etc/dnsmasq.conf <<EOF
 interface=${AP_BIND_IFACE}
 bind-interfaces
-dhcp-range=10.20.${NODE_ID}.100,10.20.${NODE_ID}.250,255.255.0.0,12h
+dhcp-range=10.20.${NODE_ID}.100,10.20.${NODE_ID}.250,255.255.255.0,12h
 dhcp-option=option:router,${NODE_IP}
+dhcp-option=option:dns-server,${NODE_IP}
 dhcp-leasefile=/var/lib/dnsmasq/xenia-${NODE_ID}.leases
+address=/xenia.mesh/${NODE_IP}
+address=/xenia.local/${NODE_IP}
+address=/node${NODE_ID}.xenia.mesh/${NODE_IP}
 EOF
 install -d -m 0755 /var/lib/dnsmasq
 
@@ -227,7 +231,13 @@ AP_IFACE="@AP_IFACE@"
 case "${1:-start}" in
   start)
     sysctl -w net.ipv4.ip_forward=1 >/dev/null
+    sysctl -w net.ipv4.conf.all.send_redirects=0 >/dev/null
+    sysctl -w net.ipv4.conf.default.send_redirects=0 >/dev/null
+    sysctl -w net.ipv4.conf.all.proxy_arp=1 >/dev/null
+    sysctl -w net.ipv4.conf.default.proxy_arp=1 >/dev/null
     iptables -P FORWARD ACCEPT 2>/dev/null || true
+    iptables -t nat -C PREROUTING -p tcp -i "$AP_IFACE" --dport 80 -j REDIRECT --to-ports 8080 2>/dev/null || \
+      iptables -t nat -A PREROUTING -p tcp -i "$AP_IFACE" --dport 80 -j REDIRECT --to-ports 8080 2>/dev/null || true
     ip link set "$AP_IFACE" up
     ip addr flush dev "$AP_IFACE"
     ip addr add "${NODE_IP}/24" dev "$AP_IFACE"
